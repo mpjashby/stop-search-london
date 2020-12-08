@@ -1,0 +1,2399 @@
+---
+output: 
+  bookdown::pdf_document2:
+    latex_engine: xelatex
+    includes:
+      in_header: "preamble.tex"
+      before-body: "before-body.tex"
+    keep_tex: true
+    number_sections: false
+    toc: false
+papersize: a4
+classoption: "twoside, 11pt"
+geometry: "top=2cm, outer=3.5cm, bottom=3cm, inner=3.5cm"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache = TRUE, echo = FALSE, fig.align = "center", fig.pos = 'tb')
+
+library("assertthat")
+library("fable")
+library("feasts")
+library("ggtext")
+library("janitor")
+library("lubridate")
+library("magick")
+library("scales")
+library("sf")
+library("tsibble")
+library("tidyverse")
+```
+
+
+
+```{r functions}
+source(here::here("../helpers.R"))
+
+# define colour scheme, based on the UCL colour scheme defined at
+# https://www.ucl.ac.uk/cam/brand/guidelines/colour
+ucl_colours <- tribble(
+  ~name, ~hex_code,
+  "Dark Green", "#555025",
+  "Dark Red", "#651D32",
+  "Dark Purple", "#4B384C",
+  "Dark Blue", "#003D4C",
+  "Dark Brown", "#4E3629",
+  "Mid Green", "#8F993E",
+  "Mid Red", "#93272C",
+  "Mid Purple", "#500778",
+  "Mid Blue", "#002855",
+  "Stone", "#D6D2C4",
+  "Bright Green", "#B5BD00",
+  "Bright Red", "#D50032",
+  "Bright Blue", "#0097A9",
+  "Bright Pink", "#AC145A",
+  "Light Green", "#BBC592",
+  "Light Red", "#E03C31",
+  "Light Purple", "#C6B0BC",
+  "Light Blue", "#8DB9CA",
+  "Yellow", "#F6BE00",
+  "Orange", "#EA7600",
+  "Grey", "#8C8279",
+  "Blue Celeste", "#A4DBE8"
+)
+
+ucl_colours_list <- set_names(ucl_colours$hex_code, ucl_colours$name)
+
+search_type_colours <- c(
+  "drugs" = ucl_colours_list[["Bright Green"]], 
+  "weapons" = ucl_colours_list[["Light Purple"]], 
+  "stolen goods" = ucl_colours_list[["Bright Blue"]], 
+  "firearms" = ucl_colours_list[["Bright Red"]], 
+  "other" = ucl_colours_list[["Blue Celeste"]], 
+  "unknown" = ucl_colours_list[["Grey"]],
+  "weapons (based on reasonable suspicion)" = ucl_colours_list[["Bright Pink"]],
+  "weapons (based on authorisation)" = ucl_colours_list[["Light Red"]]
+)
+
+prop_of_total <- function (data, var, criteria) {
+  stops %>% 
+    dplyr::filter(year_quarter == max(year_quarter)) %>% 
+    dplyr::count({{var}}) %>% 
+    janitor::adorn_percentages(denominator = "col") %>% 
+    dplyr::filter({{criteria}}) %>% 
+    purrr::pluck("n")
+}
+
+describe_quarter <- function (date) {
+  stringr::str_glue(
+    dplyr::recode(
+      ceiling(lubridate::month(date) / 3), 
+      `1` = "first", 
+      `2` = "second", 
+      `3` = "third", 
+      `4` = "fourth"
+    ),
+    " quarter of ",
+    lubridate::year(date)
+  )
+}
+
+theme_stop_search <- function (...) {
+  theme_minimal(...) %+replace%
+    theme(
+      axis.ticks = element_line(colour = "grey92"),
+      axis.title = element_text(size = 9, hjust = 1),
+      legend.key.height = unit(4, "mm"),
+      legend.key.width = unit(6, "mm"),
+      legend.position = "bottom",
+      legend.spacing.x = unit(2, "mm"),
+      legend.title = element_text(size = 9),
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor.x = element_blank(),
+      plot.caption = element_text(size = 9, colour = "grey33", hjust = 1, 
+                                  margin = margin(t = 3)),
+      plot.margin = margin(t = 0, b = 9),
+      plot.tag = element_text(size = 12, face = "bold", colour = "grey33", 
+                              hjust = 0),
+      plot.tag.position = c(0.01, 0.01),
+      plot.title = element_text(face = "plain", size = 12, hjust = 0, 
+                                margin = margin(t = 12, b = 6)),
+      plot.title.position = "plot",
+      plot.subtitle = element_text(face = "bold", size = 14, hjust = 0, 
+                                margin = margin(b = 9)),
+      strip.text.y = element_text(angle = 0, hjust = 0)
+    )
+}
+
+# add logo to chart
+add_logo <- function (chart, title) {
+
+  scs_logo <- here::here("output/ucl-banner-land-yellow-rgb.png") %>% 
+    png::readPNG() %>% 
+    grid::rasterGrob(
+      x = unit(0, "npc"), 
+      y = unit(1, "npc"), 
+      width = unit(1, "npc"),
+      hjust = 0,
+      vjust = 1
+    )
+  
+  chart <- chart + labs(
+    title = "Stop and search in London",
+    subtitle = title
+  )
+  
+  ggpubr::ggarrange(
+    grid::grobTree(
+      scs_logo,
+      grid::textGrob(
+        "INSTITUTE FOR GLOBAL CITY POLICING",
+        x = unit(1, "lines"),
+        y = unit(1, "npc") - unit(1.2, "lines"),
+        hjust = 0,
+        vjust = 1,
+        gp = grid::gpar(fontfamily = "Helvetica", fontsize = 7, 
+                        fontface = "bold")
+      )
+    ),
+    ggplotGrob(chart),
+    ggpubr::ggarrange(
+      grid::textGrob(
+        str_glue(
+          "Data: Home Office, {lubridate::year(Sys.time())} | Licence: ",
+          "Creative Commons Attribution | Author: Dr Matt Ashby"
+        ),
+        x = unit(0, "npc"), 
+        hjust = 0,
+        gp = grid::gpar(col = "grey33", fontfamily = "Helvetica", fontsize = 8, 
+                        lineheight = 1)
+      ),
+      grid::textGrob(
+        "More details: bit.ly/stop-search-london",
+        x = unit(1, "npc"), 
+        hjust = 1,
+        gp = grid::gpar(col = "grey33", fontfamily = "Helvetica", fontsize = 8, 
+                        fontface = "bold", lineheight = 1)
+      ),
+      ncol = 2,
+      widths = c(3, 1)
+    ),
+    ncol = 1,
+    hjust = 0, 
+    heights = c(3, 25.5, 1)
+  )
+  
+}
+
+# save chart
+save_chart <- function (chart, slug, title, height = 400, width = 600) {
+  ggsave(
+    filename = str_glue("{report_q}_{slug}.png"), 
+    plot = add_logo(chart, title),
+    device = "png", 
+    width = width / 72, 
+    height = height / 72, 
+    units = "in"
+  )
+}
+```
+
+
+
+```{r load data, include=FALSE}
+stops <- here::here("analysis-data/stops.rds") %>% 
+  read_rds()
+
+historical_stops <- here::here("analysis-data/historical-stop-data.rds") %>% 
+  read_rds() %>% 
+  count(financial_year, wt = n) %>% 
+  filter(financial_year < ymd("2018-04-01"))
+
+people <- read_rds(here::here("analysis-data/people.rds"))
+
+imd <- read_rds(here::here("analysis-data/imd.rds"))
+
+# https://geoportal.statistics.gov.uk/datasets/lower-layer-super-output-areas-december-2011-ew-bgc-v2
+lsoa <- sf::read_sf("https://opendata.arcgis.com/datasets/42f3aa4ca58742e8a55064a213fb27c9_0.geojson") %>% 
+  select(lsoa_code = LSOA11CD, lsoa_name = LSOA11NM, geometry)
+
+# https://geoportal.statistics.gov.uk/datasets/local-authority-districts-may-2020-boundaries-uk-bgc-1
+london_boroughs <- read_sf("https://opendata.arcgis.com/datasets/3b374840ce1b4160b85b8146b610cd0c_0.geojson") %>%
+  janitor::clean_names() %>% 
+  filter(str_detect(lad20cd, "^E09")) %>% 
+  rename(borough = lad20cd) %>% 
+  st_transform(27700)
+
+london_outline <- london_boroughs %>% 
+  st_union() %>% 
+  st_sf() %>% 
+  mutate(region = "London")
+
+ward_lad_lookup <- read_csv("https://opendata.arcgis.com/datasets/e169bb50944747cd83dcfb4dd66555b1_0.csv") %>% 
+  janitor::clean_names() %>% 
+  filter(str_detect(lad19cd, "^E09")) %>% 
+  select(wd19cd, borough = lad19nm)
+
+london_wards <- read_sf("https://opendata.arcgis.com/datasets/24fd788001d941c5a244dda6fe81dbb2_0.geojson") %>% 
+  st_transform(27700) %>% 
+  left_join(ward_lad_lookup, by = "wd19cd") %>% 
+  filter(!is.na(borough)) %>% 
+  select(ward = wd19nm, borough, geometry)
+
+london_stations <- here::here("analysis-data/stations.gpkg") %>% 
+  st_read(quiet = TRUE) %>% 
+  st_transform(27700) %>% 
+  rownames_to_column(var = "id") %>% 
+  mutate(id = as.numeric(id))
+```
+
+
+
+```{r check data values are as expected, include=FALSE}
+# check data only contains known variables
+assert_that(setequal(
+  names(stops), 
+  c(
+    "force",
+    "type",
+    "date",
+    "part_of_a_policing_operation",
+    "policing_operation",
+    "latitude",
+    "longitude",
+    "gender",
+    "age_range",
+    "self_defined_ethnicity",
+    "officer_defined_ethnicity",
+    "legislation",
+    "object_of_search",
+    "outcome",
+    "outcome_linked_to_object_of_search",
+    "removal_of_more_than_just_outer_clothing"
+  )
+))
+
+# check factors only have known levels
+assert_that(all(unique(stops$force) %in% c("British Transport Police", "City of London Police", "Metropolitan Police Service")))
+assert_that(all(unique(stops$type) %in% c("Person search", "Person and Vehicle search", "Vehicle search")))
+assert_that(all(unique(stops$gender) %in% c("male", "female", "other", NA_character_)))
+assert_that(all(unique(stops$age_range) %in% c("under 10", "10-17", "18-24", "25-34", "over 34", NA_character_)))
+assert_that(all(unique(stops$self_defined_ethnicity) %in% c(
+  "Asian/Asian British - Any other Asian background", 
+  "Asian/Asian British - Bangladeshi", 
+  "Asian/Asian British - Chinese", 
+  "Asian/Asian British - Indian", 
+  "Asian/Asian British - Pakistani", 
+  "Black/African/Caribbean/Black British - African", 
+  "Black/African/Caribbean/Black British - Any other Black/African/Caribbean background",
+  "Black/African/Caribbean/Black British - Caribbean", 
+  "Mixed/Multiple ethnic groups - Any other Mixed/Multiple ethnic background", 
+  "Mixed/Multiple ethnic groups - White and Asian", 
+  "Mixed/Multiple ethnic groups - White and Black African", 
+  "Mixed/Multiple ethnic groups - White and Black Caribbean", 
+  "Other ethnic group - Any other ethnic group", 
+  "Other ethnic group - Not stated", 
+  "White - Any other White background", 
+  "White - English/Welsh/Scottish/Northern Irish/British", 
+  "White - Irish",
+  NA_character_
+)))
+assert_that(all(unique(stops$officer_defined_ethnicity) %in% c("Asian", "Black", "Other", "White", NA_character_)))
+assert_that(all(unique(stops$legislation) %in% c(
+  "Criminal Justice and Public Order Act 1994 (section 60)", 
+  "Deer Act 1991 (section 12)", 
+  "Firearms Act 1968 (section 47)", 
+  "Misuse of Drugs Act 1971 (section 23)", 
+  "Police and Criminal Evidence Act 1984 (section 1)", 
+  "Police and Criminal Evidence Act 1984 (section 6)", 
+  "Psychoactive Substances Act 2016 (s36(2))", 
+  "Wildlife and Countryside Act 1981 (section 19)", 
+  NA_character_
+)))
+assert_that(all(unique(stops$object_of_search) %in% c(
+  "anything to threaten or harm anyone", 
+  "article for use in theft", 
+  "articles for use in criminal damage",
+  "controlled drugs", 
+  "crossbows", 
+  "evidence of offences under the act", 
+  "evidence of wildlife offences",
+  "firearms", 
+  "fireworks",
+  "goods on which duty has not been paid etc.", 
+  "offensive weapons",
+  "psychoactive substances", 
+  "stolen goods",
+  NA_character_
+)))
+assert_that(all(unique(stops$outcome) %in% c(
+  "a no further action disposal", 
+  "arrest",
+  "caution (simple or conditional)",
+  "community resolution",
+  "khat or cannabis warning",
+  "local resolution",
+  "nothing found - no further action",
+  "offender given drugs possession warning",
+  "offender given penalty notice",
+  "penalty notice for disorder",
+  "summons / charged by post", 
+  "suspect arrested",
+  "suspect summonsed to court",
+  NA_character_
+)))
+
+# check date/time is POSIXct
+assert_that(all(is.POSIXct(stops$date)))
+
+# check co-ordinates are valid
+# bounding box co-ordinates from https://gist.github.com/graydon/11198540
+assert_that(all(is.double(stops$longitude)))
+assert_that(all(stops$longitude >= -180, na.rm = TRUE))
+assert_that(all(stops$longitude <= 180, na.rm = TRUE))
+assert_that(all(is.double(stops$latitude)))
+assert_that(all(stops$latitude >= -90, na.rm = TRUE))
+assert_that(all(stops$latitude <= 90, na.rm = TRUE))
+```
+
+
+
+```{r remove non-London BTP stops}
+btp_london_stops <- stops %>% 
+  filter(force == "British Transport Police", !is.na(latitude), 
+         !is.na(longitude)) %>% 
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326, remove = FALSE) %>% 
+  st_transform(27700) %>% 
+  st_join(london_outline) %>% 
+  filter(region == "London") %>% 
+  as_tibble() %>% 
+  select(-region)
+
+stops <- stops %>% 
+  filter(force != "British Transport Police") %>% 
+  bind_rows(btp_london_stops)
+```
+
+
+
+```{r harmonise variables}
+stops <- stops %>% 
+  mutate(
+    object_of_search = case_when(
+      legislation == "Criminal Justice and Public Order Act 1994 (section 60)" ~ 
+        "offensive weapons",
+      TRUE ~ object_of_search
+    ),
+    object = recode(
+      object_of_search,
+      "controlled drugs" = "drugs",
+      "offensive weapons" = "weapons",
+      "evidence of offences under the act" = "unknown",
+      "articles for use in criminal damage" = "other",
+      "article for use in theft" = "other",
+      "evidence of wildlife offences" = "other",
+      "fireworks" = "other",
+      "goods on which duty has not been paid etc." = "other",
+      "anything to threaten or harm anyone" = "weapons",
+      "crossbows" = "weapons",
+      "psychoactive substances" = "drugs"
+    ),
+    outcome = recode(
+      outcome,
+      "suspect arrested" = "arrest",
+      "community resolution" = "community/local resolution",
+      "local resolution" = "community/local resolution",
+      "caution (simple or conditional)" = "caution",
+      "offender cautioned" = "caution",
+      "khat or cannabis warning" = "drugs warning",
+      "offender given penalty notice" = "fixed penalty",
+      "penalty notice for disorder" = "fixed penalty",
+      "offender given drugs possession warning" = "drugs warning",
+      "a no further action disposal" = "no further action",
+      "nothing found - no further action" = "no further action",
+      "suspected psychoactive substances seized - no further action" = 
+        "no further action",
+      "summons / charged by post" = "charged by post",
+      "suspect summonsed to court" = "charged by post"
+    ),
+    year = year(date),
+    year_month = yearmonth(date),
+    year_quarter = yearquarter(date)
+  ) %>% 
+  replace_na(list(object = "unknown", outcome = "unknown")) %>% 
+  mutate(
+    outcome = fct_relevel(
+      outcome,
+      "arrest",
+      "charged by post",
+      "caution",
+      "fixed penalty",
+      "community/local resolution",
+      "drugs warning",
+      "no further action",
+      "unknown"
+    )
+  ) %>% 
+  filter(year >= 2018)
+```
+
+
+
+```{r create report date strings}
+report_period <- str_glue(
+  format(as_date(yearmonth(max(stops$date))) - months(2), "%B"), 
+  " to ",
+  format(max(stops$date), "%B %Y")
+)
+
+report_between <- str_replace(report_period, " to ", " and ")
+report_span <- str_replace(report_period, " to ", "–")
+report_q <- paste(
+  year(max(stops$date)),
+  case_when(
+    month(max(stops$date)) %in% c(1, 2, 3) ~ "q1",
+    month(max(stops$date)) %in% c(4, 5, 6) ~ "q2",
+    month(max(stops$date)) %in% c(7, 8, 9) ~ "q3",
+    month(max(stops$date)) %in% c(10, 11, 12) ~ "q4",
+    TRUE ~ NA_character_
+  ),
+  sep = "_"
+)
+```
+
+
+
+```{r count stops and analyse trend, include=FALSE}
+monthly_counts <- stops %>% 
+  count(year_month) %>% 
+  mutate(
+    year_month = as_date(year_month),
+    diff = n - lag(n),
+    diff_perc = diff / lag(n)
+  )
+
+quarterly_counts <- stops %>% 
+  count(year_quarter) %>% 
+  mutate(
+    year_quarter = as_date(year_quarter),
+    diff = n - lag(n),
+    diff_perc = diff / lag(n)
+  )
+
+monthly_counts_feats <- as.list(
+  feasts::feat_stl(monthly_counts$n, .period = 12)
+)
+
+quarterly_counts_feats <- as.list(
+  feasts::feat_stl(quarterly_counts$n, .period = 4)
+)
+
+monthly_counts_anomaly <- timetk::tk_anomaly_diagnostics(
+  monthly_counts, 
+  .date_var = year_month, 
+  .value = n
+)
+
+total_searches <- stops %>% 
+  filter(year_quarter == max(year_quarter)) %>% 
+  count() %>% 
+  pluck("n", 1)
+
+days_in_quarter <- days_in_month(as_date(max(stops$year_month))) + 
+  days_in_month(as_date(max(stops$year_month)) - months(1)) + 
+  days_in_month(as_date(max(stops$year_month)) - months(2))
+```
+
+
+
+```{r search types}
+main_types <- c("drugs", "firearms", "stolen goods", "weapons")
+
+searches_by_type <- count(stops, year_quarter, object)
+```
+
+
+
+```{r search results by month}
+search_result_month_counts <- stops %>% 
+  mutate(
+    positive = !outcome %in% c("no further action", "unknown"),
+    year_month = as_date(year_month)
+  ) %>% 
+  count(year_month, positive) %>% 
+  group_by(year_month) %>% 
+  mutate(prop = n / sum(n)) %>% 
+  ungroup()
+
+search_result_quarter_counts <- stops %>% 
+  mutate(
+    positive = !outcome %in% c("no further action", "unknown"),
+    year_quarter = as_date(year_quarter)
+  ) %>% 
+  count(year_quarter, positive) %>% 
+  group_by(year_quarter) %>% 
+  mutate(prop = n / sum(n)) %>% 
+  ungroup()
+```
+
+
+
+```{r search disparity}
+person_stops <- filter(
+  stops, 
+  type %in% c("Person search", "Person and Vehicle search")
+)
+
+age_counts <- person_stops %>% 
+  filter(year_quarter == max(year_quarter), !is.na(age_range)) %>% 
+  tabyl(age_range)
+
+sde_counts <- person_stops %>% 
+  filter(year_quarter == max(year_quarter), !is.na(self_defined_ethnicity)) %>% 
+  mutate(
+    sde_group = case_when(
+      self_defined_ethnicity == "Other ethnic group - Not stated" ~ 
+        NA_character_,
+      str_detect(self_defined_ethnicity, "^Asian") ~ "Asian/Asian British",
+      str_detect(self_defined_ethnicity, "^Black") ~ "Black/Black British",
+      str_detect(self_defined_ethnicity, "^Mixed") ~ 
+        "from multiple ethnic groups",
+      str_detect(self_defined_ethnicity, "^Other") ~ 
+        "from another ethnic group",
+      str_detect(self_defined_ethnicity, "^White") ~ "white",
+      TRUE ~ NA_character_
+    )
+  ) %>% 
+  tabyl(sde_group) %>% 
+  arrange(desc(valid_percent))
+
+stops_disparity <- person_stops %>% 
+  filter(
+    year_quarter == max(year_quarter), 
+    !is.na(gender),
+    gender %in% c("female", "male"),
+    !is.na(age_range), 
+    age_range != "under 10",
+    !str_detect(self_defined_ethnicity, "^Other ethnic group")
+  ) %>% 
+  rename(sex = gender) %>% 
+  count(sex, age_range, self_defined_ethnicity, name = "searches") %>% 
+  left_join(people, by = c("sex", "age_range", "self_defined_ethnicity")) %>% 
+  separate(self_defined_ethnicity, c("ethnic_group", "ethnicity"), " - ") %>% 
+  group_by(age_range, ethnic_group, sex) %>% 
+  summarise(people = sum(people), searches = sum(searches), 
+            .groups = "drop") %>% 
+  mutate(
+    ethnic_group = str_extract(ethnic_group, "^\\w+"),
+    age_label = case_when(
+      age_range %in% c("under 10", "10-17") & sex == "female" ~ "girls",
+      age_range %in% c("under 10", "10-17") & sex == "male" ~ "boys",
+      !age_range %in% c("under 10", "10-17") & sex == "female" ~ "women",
+      !age_range %in% c("under 10", "10-17") & sex == "male" ~ "men",
+    ),
+    group = str_glue("**{age_label}** aged **{age_range}** identifying as ",
+                     "**{ethnic_group}**"),
+    search_rate = searches / (people / 1000)
+  )
+
+stops_disparity_object <- person_stops %>% 
+  mutate(
+    object = case_when(
+      object == "weapons" & 
+        legislation == "Police and Criminal Evidence Act 1984 (section 1)" ~ 
+        "weapons (based on reasonable suspicion)",
+      object == "weapons" & 
+        legislation == "Criminal Justice and Public Order Act 1994 (section 60)" ~ 
+        "weapons (based on authorisation)",
+      object == "weapons" ~ "unknown",
+      TRUE ~ object
+    )
+  ) %>% 
+  filter(
+    year_quarter == max(year_quarter), 
+    !is.na(age_range), 
+    age_range != "under 10",
+    !is.na(gender),
+    gender %in% c("female", "male"),
+    !object %in% c("other", "unknown"),
+    !str_detect(self_defined_ethnicity, "^Other ethnic group")
+  ) %>% 
+  select(object, sex = gender, age_range, self_defined_ethnicity) %>% 
+  mutate_if(is.character, as.factor) %>% 
+  count(object, sex, age_range, self_defined_ethnicity, name = "searches", .drop = FALSE) %>% 
+  left_join(people, by = c("sex", "age_range", "self_defined_ethnicity")) %>% 
+  separate(self_defined_ethnicity, c("ethnic_group", "ethnicity"), " - ") %>% 
+  group_by(object, age_range, ethnic_group, sex) %>% 
+  summarise(people = sum(people), searches = sum(searches), 
+            .groups = "drop") %>% 
+  mutate(
+    ethnic_group = str_extract(ethnic_group, "^\\w+"),
+    age_label = case_when(
+      age_range %in% c("under 10", "10-17") & sex == "female" ~ "girls",
+      age_range %in% c("under 10", "10-17") & sex == "male" ~ "boys",
+      !age_range %in% c("under 10", "10-17") & sex == "female" ~ "women",
+      !age_range %in% c("under 10", "10-17") & sex == "male" ~ "men",
+    ),
+    group = str_glue("{age_label}, {age_range}, {ethnic_group}"),
+    search_rate = searches / (people / 1000)
+  )
+
+stops_model <- stops_disparity %>% 
+  mutate(
+    age_range = fct_relevel(age_range, "over 34"),
+    ethnic_group = fct_relevel(ethnic_group, "White"),
+    sex = fct_relevel(sex, "female")
+  ) %>% 
+  {
+    glm(log(search_rate) ~ sex + age_range + ethnic_group, data = .)
+  } %>% 
+  broom::tidy() %>% 
+  arrange(desc(estimate)) %>% 
+  # keep only model terms that are greater than zero, significant and greater 
+  # than the largest co-efficients for ethnicity
+  filter(
+    estimate > 0,
+    estimate > 
+      pluck(filter(., str_detect(term, "^ethnic_group")), "estimate", 1),
+    p.value < 0.05
+  ) %>%
+  mutate(
+    term = case_when(
+      str_detect(term, "^age_range") ~
+        str_glue("being aged {str_remove(term, '^age_range')}"),
+      str_detect(term, "^sex") ~ str_glue("being {str_remove(term, '^sex')}"),
+      TRUE ~ term
+    )
+    # term = case_when(
+    #   str_detect(term, "^age_range") ~ 
+    #     str_glue("being aged {str_remove(term, '^age_range')}"),
+    #   str_detect(term, "^ethnic_group") ~ 
+    #     str_glue("self-defining as '{str_remove(term, '^ethnic_group')}'"),
+    #   str_detect(term, "^sex") ~ str_glue("being {str_remove(term, '^sex')}"),
+    #   TRUE ~ term
+    # )
+  ) %>% 
+  pull("term") %>% 
+  {
+    if ("being aged 10-17" %in% . & "being aged 18-24" %in% . & 
+        "being aged 25-34" %in% .) {
+      c(str_subset(., "^being aged", negate = TRUE), "being aged under 35")
+    } else if ("being aged 10-17" %in% . & "being aged 18-24" %in% .) {
+      c(str_subset(., "^being aged", negate = TRUE), "being aged under 25")
+    } else if ("being aged 18-24" %in% . & "being aged 25-34" %in% .) {
+      c(str_subset(., "^being aged", negate = TRUE), "being aged 18-34")
+    } else {
+      .
+    }
+  }
+
+overall_search_rate <- sum(stops_disparity$searches) / (sum(stops_disparity$people) / 1000)
+```
+
+
+
+```{r searches by borough and ward, include=FALSE}
+searches_by_borough <- stops %>% 
+  filter(
+    !is.na(latitude), 
+    !is.na(longitude), 
+    year_quarter == max(year_quarter)
+  ) %>% 
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>% 
+  st_transform(27700) %>% 
+  st_join(london_boroughs) %>% 
+  as_tibble() %>% 
+  count(borough, name = "searches") %>% 
+  filter(!is.na(borough)) %>% 
+  arrange(desc(searches))
+
+searches_by_ward <- stops %>% 
+  filter(
+    !is.na(latitude), 
+    !is.na(longitude), 
+    year_quarter == max(year_quarter)
+  ) %>% 
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>% 
+  st_transform(27700) %>% 
+  st_join(london_wards) %>% 
+  as_tibble() %>% 
+  count(borough, ward, name = "searches") %>% 
+  filter(!is.na(borough), !is.na(ward)) %>% 
+  arrange(desc(searches))
+
+stops_by_lsoa <- stops %>% 
+  filter(
+    !is.na(latitude), 
+    !is.na(longitude), 
+    year_quarter == max(year_quarter)
+  ) %>% 
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>% 
+  st_join(lsoa) %>% 
+  st_set_geometry(NULL) %>% 
+  mutate(object = case_when(
+    object == "weapons" & 
+      legislation == "Criminal Justice and Public Order Act 1994 (section 60)" ~ 
+      "weapons under section 60",
+    object == "weapons" ~ "weapons under section 1",
+    TRUE ~ object
+  ))
+
+# this code first identifies all the LSOAs in London, then counts the searches 
+# in each one, since this keeps the LSOAs with zero searches
+stop_concentration <- lsoa %>% 
+  st_transform(27700) %>% 
+  st_join(london_boroughs) %>% 
+  filter(!is.na(borough)) %>% 
+  st_set_geometry(NULL) %>% 
+  select(lsoa_code) %>% 
+  left_join(count(stops_by_lsoa, lsoa_code, name = "searches")) %>% 
+  replace_na(list(searches = 0)) %>% 
+  arrange(desc(searches)) %>% 
+  mutate(
+    csum_searches = cumsum(searches),
+    csum_searches = csum_searches / max(csum_searches),
+    perc_rank = row_number() / n()
+  ) %>% 
+  filter(csum_searches > 0.5) %>% 
+  slice(1) %>% 
+  pull(perc_rank)
+
+low_search_boroughs <- pull(filter(searches_by_borough, searches < searches_by_ward$searches[1]), borough)
+
+places_less_than_top_ward <- case_when(
+  length(low_search_boroughs) > 5 ~ str_glue("{number_to_text(length(low_search_boroughs))} entire boroughs"),
+  length(low_search_boroughs) > 0 ~ str_glue("the entire boroughs of {vector_to_text(pull(filter(searches_by_borough, searches < searches_by_ward$searches[1]), borough), final_sep = ' or ')}"),
+  TRUE ~ str_glue("the {comma(nrow(filter(mutate(arrange(searches_by_ward, searches), csum_searches = cumsum(searches)), csum_searches < searches_by_ward$searches[1])))} wards with the fewest searches combined")
+)
+```
+
+
+
+```{r headlines}
+headline1 <- str_glue(
+  "Police in London stopped and searched ",
+  comma(pluck(count(filter(stops, year_quarter == max(year_quarter))), "n", 1)),
+  " people and vehicles in the three months from {report_period}. The number ",
+  "of searches has generally ",
+  ifelse(monthly_counts_feats$linearity > 0, "increased", "decreased"),
+  " over the past two years."
+)
+
+headline2 <- str_replace_all(str_glue(
+  percent(pluck(arrange(janitor::adorn_percentages(
+    count(filter(stops, year_quarter == max(year_quarter)), object), 
+  denominator = "col"), desc(n)), "n", 1)),
+  " of searches were for ",
+  pluck(arrange(janitor::adorn_percentages(
+    count(filter(stops, year_quarter == max(year_quarter)), object), 
+  denominator = "col"), desc(n)), "object", 1),
+  ", with ",
+  percent(1 - tail(search_result_quarter_counts$prop, 1)),
+  " of all searches resulting in no further action."
+), "%", "\\\\%")
+
+# headline3 <- str_glue(
+#   "Different demographic groups are searched at different rates, with ",
+#   str_remove_all(pluck(arrange(stops_disparity, desc(search_rate)), "group", 1), 
+#                  "\\*\\*"),
+#   " being ", 
+#   number(
+#     pluck(arrange(stops_disparity, desc(search_rate)), "search_rate", 1) / 
+#       overall_search_rate
+#   ), 
+#   " times more likely to be searched than the population as a whole."
+# )
+
+headline4 <- str_replace_all(str_glue(
+  "Searches are heavily concentrated in some areas -- half of all searches ",
+  "occurred in {percent(stop_concentration)} of neighbourhoods."
+), "%", "\\\\%")
+```
+
+
+
+<!-- single space at the end of each sentence -->
+\frenchspacing
+
+<!-- left align as per UCL style guide -->
+\raggedright
+
+<!-- prevent vertical justification of paragraphs -->
+\raggedbottom
+
+<!-- The following blocks of Latex code produce the title page -->
+
+\begin{textblock*}{21cm}(0mm, 0mm)
+\includegraphics[width=21cm,height=29.7cm]{`r str_glue("cover_image_{report_q}.jpg")`}
+\end{textblock*}
+
+\begin{textblock*}{21cm}(0mm, 0mm)
+\includegraphics[width=21cm]{ucl-banner-port-yellow-rgb-lg.png}
+\end{textblock*}
+
+\begin{textblock*}{21cm}(1cm,1cm)
+\textbf{\sffamily INSTITUTE FOR GLOBAL CITY POLICING}
+\end{textblock*}
+
+\begin{textblock*}{18cm}(3cm, 13.66cm)
+\raggedright \sffamily
+\begin{singlespace}
+\colorbox{white}{\hspace{1cm}\parbox[c][5.9cm]{16cm}{
+{\fontsize{40}{32}\selectfont \bfseries \mbox{Stop and search}\\\mbox{in London}
+\vspace{6pt}}
+
+{\fontsize{40}{32}\selectfont \mbox{`r report_period`} }
+
+}\hspace{1cm}}
+\end{singlespace}
+\end{textblock*}
+
+\begin{textblock*}{11.43cm}(0cm, 24.13cm)
+\colorbox{uclyellow}{\parbox[c][2.63cm]{\textwidth}{
+\centering \bfseries \sffamily \fontsize{16}{16}\selectfont 
+Dr Matt Ashby\ \ |\ \ `r format(Sys.time(), "%B %Y")`
+}}
+\end{textblock*}
+
+\ 
+
+\thispagestyle{empty}
+\newpage
+
+
+
+# Main points
+
+
+
+\textbf{\sffamily `r headline1`}
+
+\textbf{\sffamily `r headline2`}
+
+\textbf{\sffamily `r headline4`}
+
+
+
+```{r Twitter cover image, include=FALSE}
+cover_bg <- str_glue("output/cover_image_{report_q}.jpg") %>% 
+  here::here() %>% 
+  image_read() %>% 
+  image_scale("1200x") %>% 
+  image_crop("x800", gravity = "West")
+cover_logo <- here::here("output/ucl-banner-land-yellow-rgb.png") %>% 
+  image_read() %>% 
+  image_scale("1200x")
+
+twitter_cover <- image_composite(cover_bg, cover_logo) %>% 
+  image_annotate("INSTITUTE FOR GLOBAL CITY POLICING", location = "+17+17", 
+                 font = "Arial", size = 13.5, weight = 700) %>% 
+  image_draw()
+rect(200, 280, 1200, 560, col = "white", border = NA)
+text(235, 370, "Stop and search", adj = c(0, 0), family = "Arial", cex = 6, font = 2)
+text(235, 405, "in London", adj = c(0, 0.5), family = "Arial", cex = 6, font = 2)
+text(235, 440, report_period, adj = c(0, 1), family = "Arial", cex = 6)
+dev.off()
+
+image_write(twitter_cover, str_glue("{report_q}_00_cover.png"))
+```
+
+
+
+# Introduction
+
+Stop and search is a legal power that allows police officers to search people to find out if they are carrying prohibited items such as drugs, weapons or stolen goods. Stop and search means officers can confirm if a person is or is not in possession of contraband without arresting them and taking them to a police station, but it is also a source of tension between police and communities. [A review by the College of Policing](https://whatworks.college.police.uk/Research/Documents/SS_and_crime_report.pdf) found little relationship between how many searches police do and how much crime occurs, but [police insist stop and search helps them fight crime](https://www.met.police.uk/advice/advice-and-information/st-s/stop-and-search/why-we-use-stop-and-search/). This report is the first of a series that will analyse stop and search in London each quarter.
+
+
+
+(ref:chart-trend-overall) Number of stop-and-searches in London, `r format(min(stops$date), '%B %Y')` to `r {format(max(stops$date), '%B %Y')}`
+
+```{r chart-trend-overall, fig.asp=0.5, fig.cap="(ref:chart-trend-overall)", fig.pos="bh", message=FALSE, warning=FALSE}
+chart_trend <- ggplot(monthly_counts_anomaly, aes(year_month, observed)) + 
+  ggrepel::geom_label_repel(
+    aes(label = format(year_month, "%b %Y")),
+    data = filter(monthly_counts_anomaly, anomaly == "Yes"),
+    box.padding = unit(1, "lines"),
+    direction = "x",
+    xlim = c(NA, max(monthly_counts_anomaly$year_month) - years(2)),
+    # segment.colour = "#EA7600",
+    size = chart_elements$label_text_size,
+    label.size = NA
+  ) +
+  geom_point(
+    size = 3, 
+    shape = 21, 
+    fill = "white",
+    show.legend = FALSE,
+    data = filter(monthly_counts_anomaly, anomaly == "Yes")
+  ) +
+  geom_rect(
+    aes(
+      xmin = financial_year, 
+      xmax = financial_year + years(1), 
+      ymin = 0, 
+      ymax = n / 12
+    ), 
+    data = filter(historical_stops, financial_year < max(financial_year)),
+    inherit.aes = FALSE,
+    fill = "#EA7600",
+    alpha = 0.5
+  ) +
+  geom_rect(
+    aes(
+      xmin = financial_year, 
+      xmax = financial_year + months(8), 
+      ymin = 0, 
+      ymax = n / 12
+    ), 
+    data = filter(historical_stops, financial_year == max(financial_year)),
+    inherit.aes = FALSE,
+    fill = "#EA7600",
+    alpha = 0.5
+  ) +
+  geom_col(fill = "#EA7600", width = 31) +
+  geom_point(
+    size = 3, 
+    shape = 21, 
+    fill = NA,
+    show.legend = FALSE,
+    data = filter(monthly_counts_anomaly, anomaly == "Yes")
+  ) +
+  annotate(
+    "text", 
+    x = min(historical_stops$financial_year) + months(3),
+    y = (max(historical_stops$n) / 12) * 0.1,
+    label = "before 2018, only annual counts of\nsearches were published by the Home Office",
+    colour = "grey20",
+    size = chart_elements$label_text_size,
+    lineheight = chart_elements$label_text_lineheight,
+    hjust = 0,
+    vjust = 1
+  ) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  scale_y_continuous(labels = comma_format(), limits = c(0, NA), 
+                     expand = expansion(mult = c(0, 0.025)), 
+                     position = "right") +
+  scale_colour_manual(values = c("No" = "grey70", "Yes" = "#EA7600"), 
+                      guide = guide_none()) +
+  scale_alpha_manual(
+    values = c(`TRUE` = 1),
+    labels = c(`TRUE` = "trend, excluding anomalies")
+  ) +
+  labs(
+    x = NULL, 
+    y = "number of searches per month", 
+    caption = str_glue("labelled months are anomalies with unusually high/low ",
+                       "numbers of stops"),
+    alpha = NULL
+  ) +
+  theme_stop_search() +
+  theme(
+    axis.title.y = element_text(hjust = 0),
+    legend.background = element_rect(colour = NA, fill = "white"),
+    legend.justification = c(1, 1),
+    legend.position = c(1, 1)
+  )
+
+save_chart(
+  chart_trend, 
+  "01_trend",
+  str_glue(
+    "Number of stop-and-searches in London, ",
+    "{format(min(stops$date), '%B %Y')} to {format(max(stops$date), '%B %Y')}"
+  )
+)
+
+chart_trend
+
+```
+
+
+
+**Between `r report_between`, police officers in London carried out `r comma(pluck(count(filter(stops, year_quarter == max(year_quarter))), "n", 1))` stop-and-searches**, or about `r comma(pluck(count(filter(stops, year_quarter == max(year_quarter))), "n", 1) / 13)` per week. Of those, `r percent(prop_of_total(stops, force, force == "Metropolitan Police Service"))` were conducted by the Metropolitan Police, `r percent(prop_of_total(stops, force, force == "British Transport Police"))` by British Transport Police and `r ifelse(prop_of_total(stops, force, force == "City of London Police") < 0.001, "less than 0.1%", percent(prop_of_total(stops, force, force == "City of London Police")))` by City of London Police. Across the three forces, `r percent(prop_of_total(stops, type, type == "Person search"))` of stops were of pedestrians, `r percent(prop_of_total(stops, type, type == "Person and Vehicle search"))` of people in vehicles and `r percent(prop_of_total(stops, type, type == "Vehicle search"))` of only vehicles.
+
+
+
+```{r}
+quarterly_change <- str_glue(
+  "**", 
+  ifelse(nth(quarterly_counts$n, -1) - nth(quarterly_counts$n, -2) > 0, 
+         "an increase", "a decrease"),
+  " of ",
+  percent(abs((nth(quarterly_counts$n, -1) - nth(quarterly_counts$n, -2)) / 
+                nth(quarterly_counts$n, -2))),
+  " from the previous month**",
+  ifelse(
+    last(abs(quarterly_counts$diff)) > max(abs(head(tail(quarterly_counts$diff, 6), 5))), 
+    # ADAPT THIS TO USE ORDINAL QUARTERS RATHER THAN MONTHS
+    str_glue(
+      " and the largest quarterly change since ", 
+      ifelse(
+        nrow(slice(filter(slice(quarterly_counts, 1:n() - 1), abs(diff) > 
+                            abs(last(quarterly_counts$diff))), n())) == 0, 
+        paste("at least", format(first(quarterly_counts$year_quarter), "%B %Y")),
+        format(pluck(slice(
+          filter(slice(quarterly_counts, 1:n() - 1), abs(diff) > 
+                   abs(last(quarterly_counts$diff))), 
+        n()), "year_quarter"), "%B% %Y")
+      )
+    ), 
+    ""
+  ),
+  "."
+)
+
+change_from_last_quarter <- str_glue(
+  ifelse(nth(quarterly_counts$diff, -1) > 0, "an increase", "a decrease"), 
+  " of ",
+  percent(abs(nth(quarterly_counts$diff, -1) / nth(quarterly_counts$n, -2)))
+)
+
+largest_quarterly_change_since <- ifelse(
+  last(abs(quarterly_counts$diff)) > max(abs(head(tail(quarterly_counts$diff, 6), 5))), 
+  str_glue(
+    " and the largest quarterly change since", 
+    ifelse(
+      nrow(slice(filter(slice(quarterly_counts, 1:n() - 1), abs(diff) > abs(last(quarterly_counts$diff))), n())) == 0, 
+      str_glue(" at least the {describe_quarter(first(quarterly_counts$year_quarter))}"),
+      str_glue(" the ", describe_quarter(pluck(slice(filter(slice(quarter_counts, 1:n() - 1), abs(diff) > abs(last(quarterly_counts$diff))), n()), "year_month")))
+    )
+  ), 
+  ""
+)
+
+change_vs_trend <- ifelse(
+  quarterly_counts_feats$trend_strength > 0.5, 
+  str_glue(
+    " This ", 
+    ifelse(nth(quarterly_counts$diff, -1) > 0, "increase", "decrease"), 
+    " was ", 
+    ifelse(
+      (
+        quarterly_counts_feats$trend_strength > 0 & nth(quarterly_counts$diff, -1) > 0 | 
+        quarterly_counts_feats$trend_strength < 0 & nth(quarterly_counts$diff, -1) < 0
+      ), 
+      "consistent with", 
+      "contrary to"
+    ), 
+    " the long-term ", 
+    ifelse(quarterly_counts_feats$linearity > 0, "upward", "downward"), 
+    " trend, with stops having ", 
+    ifelse(quarterly_counts_feats$linearity > 0, "**increased", "**decreased"), 
+    " by ", 
+    percent(mean(tail(monthly_counts$diff_perc, 24), na.rm = TRUE)), 
+    " per month on average over the past two years.**"
+  ), 
+  ""
+)
+```
+
+
+
+The number of searches carried out in `r report_period` was **`r change_from_last_quarter` from the previous quarter**`r largest_quarterly_change_since` (Figure \@ref(fig:chart-trend-overall)).
+`r ifelse(monthly_counts_feats$trend_strength > 0.5, paste(" This", ifelse(nth(quarterly_counts$n, -1) - nth(quarterly_counts$n, -2) > 0, "increase", "decrease"), "was", ifelse((quarterly_counts_feats$trend_strength > 0 & nth(quarterly_counts$n, -1) - nth(quarterly_counts$n, -2) > 0) | (quarterly_counts_feats$trend_strength < 0 & nth(quarterly_counts$n, -1) - nth(quarterly_counts$n, -2) < 0), "consistent with", "contrary to"), "the", ifelse(quarterly_counts_feats$linearity > 0, "upward", "downward"), "trend since 2018, with stops having", ifelse(quarterly_counts_feats$linearity > 0, "**increased", "**decreased"), "by", percent(mean(tail(monthly_counts$diff_perc, 24))), "per month on average over the past two years.**"), "")` Prior to 2018, the number of searches had decreased every year since 2009, dropping by `r percent(abs((last(historical_stops$n) - first(historical_stops$n)) / first(historical_stops$n)))` in nine years.
+
+
+
+# What items are people searched for?
+
+(ref:chart-search-types) Searches by type of object being searched for, `r report_period`
+
+```{r chart-search-types, fig.asp=0.33, fig.cap="(ref:chart-search-types)"}
+chart_search_types <- searches_by_type %>% 
+  filter(year_quarter == max(year_quarter)) %>% 
+  mutate(
+    align = ifelse(n > max(n) / 2, 1, 0),
+    object = fct_relevel(fct_reorder(object, n), "unknown", "other"),
+    percent = percent(n / sum(n), accuracy = 0.1)
+  ) %>% 
+  ggplot(aes(n, object, fill = object, label = str_glue(" {percent} "), 
+             hjust = align)) +
+  geom_col() +
+  geom_text(size = chart_elements$label_text_size) +
+  scale_x_continuous(
+    labels = comma_format(), 
+    expand = expansion(mult = c(0, 0.025))
+  ) +
+  scale_fill_manual(values = search_type_colours) +
+  labs(
+    x = "number of searches", 
+    y = NULL
+  ) +
+  theme_stop_search() +
+  theme(
+    legend.position = "none",
+    panel.grid.major.x = element_line(),
+    panel.grid.major.y = element_blank()
+  )
+
+save_chart(
+  chart_search_types, 
+  "02_types",
+  str_glue("Searches by type of object being searched for, {report_period}"),
+)
+
+chart_search_types
+```
+
+
+
+```{r search types change}
+search_type_trends <- stops %>% 
+  count(year_month, object) %>% 
+  filter(
+    !object %in% c("other", "unknown"), 
+    as_date(year_month) >= as_date(max(stops$year_month)) - years(1)
+  ) %>% 
+  group_by(object) %>% 
+  arrange(year_month) %>% 
+  mutate(
+    change = n / first(n),
+    year_month = as_date(year_month)
+  ) %>% 
+  ungroup() %>% 
+  as_tsibble(key = object, index = year_month) %>% 
+  model(lm = fable::TSLM(change ~ trend())) %>% 
+  mutate(coefs = map(lm, broom::tidy)) %>% 
+  unnest(cols = c(coefs)) %>% 
+  filter(term == "trend()", object %in% main_types)
+
+search_type_order <- searches_by_type %>% 
+  filter(object %in% main_types) %>% 
+  group_by(object) %>% 
+  summarise(n = mean(n), .groups = "drop") %>% 
+  arrange(desc(n)) %>% 
+  pull(object)
+
+search_type_increase <- search_type_trends %>% 
+  filter(estimate > 0 & p.value < 0.05) %>% 
+  pull("object")
+
+search_type_decrease <- search_type_trends %>% 
+  filter(estimate < 0 & p.value < 0.05) %>% 
+  pull("object")
+
+search_type_changes <- case_when(
+  length(search_type_increase) == length(main_types) ~ 
+    str_glue("{vector_to_text(search_type_increase)} have all increased"),
+  length(search_type_decrease) == length(main_types) ~ 
+    str_glue("{vector_to_text(search_type_decrease)} have all decreased"),
+  length(search_type_increase) > 0 & length(search_type_decrease) > 0 ~ 
+    str_glue("{vector_to_text(search_type_increase)} have increased while searches for {vector_to_text(search_type_decrease)} have decreased{ifelse(length(search_type_increase) + length(search_type_decrease) < length(main_types), paste0(' and ', vector_to_text(setdiff(main_types, search_type_increase))), '')}"), 
+  length(search_type_increase) > 0 ~ 
+    str_glue("{vector_to_text(search_type_increase)} have increased while searches for {vector_to_text(setdiff(main_types, search_type_increase))} have remained largely static"), 
+  length(search_type_decrease) > 0 ~ 
+    str_glue("{vector_to_text(search_type_decrease)} have decreased while searches for {vector_to_text(setdiff(main_types, search_type_increase))} have remained largely static"), 
+  TRUE ~ "all these items have remained largely static"
+)
+```
+
+
+
+Police officers are empowered to search people for different items -- including drugs, items to use in theft or criminal damage, stolen goods, weapons and even some fireworks -- under different acts of parliament. Although police emphasise that stop and search "[protects Londoners by taking weapons off the streets](https://www.met.police.uk/police-forces/metropolitan-police/areas/about-us/about-the-met/stop-and-search/)", only about one in `r number_to_text(round(1 / pull(filter(janitor::adorn_percentages(filter(searches_by_type, year_quarter == max(year_quarter)), denominator = "col"), object == "weapons"), "n")))` searches between `r report_between` were for weapons -- **`r percent(pluck(arrange(janitor::adorn_percentages(filter(searches_by_type, year_quarter == max(year_quarter)), denominator = "col"), desc(n)), "n", 1))` of searches were for `r pluck(arrange(janitor::adorn_percentages(filter(searches_by_type, year_quarter == max(year_quarter)), denominator = "col"), desc(n)), "object", 1)`** (Figure \@ref(fig:chart-search-types)).
+
+
+
+(ref:chart-search-types-change) Change in number of searches by type, `r format(min(stops$date), '%B %Y')` to `r format(max(stops$date), '%B %Y')`
+
+```{r chart-search-types-change, fig.asp=0.5, fig.cap="(ref:chart-search-types-change)", fig.pos="bh"}
+chart_types_change <- stops %>% 
+  count(year_month, object) %>% 
+  filter(!object %in% c("other", "unknown")) %>% 
+  group_by(object) %>% 
+  arrange(year_month) %>% 
+  mutate(
+    change = n / first(n),
+    year_month = as_date(year_month)
+  ) %>% 
+  ungroup() %>% 
+  mutate(object = fct_relevel(object, search_type_order)) %>% 
+  ggplot(aes(year_month, change, colour = object)) +
+  geom_segment(aes(xend = year_month, yend = 1), colour = "grey70", 
+               size = 0.25) +
+  geom_hline(aes(yintercept = 1), 
+             colour = chart_elements$reference_line_colour) +
+  geom_point(colour = "grey70", size = 0.75) +
+  geom_smooth(method = "loess", formula = "y ~ x", se = FALSE) +
+  scale_x_date(date_breaks = "1 year", date_labels = "'%y",
+               expand = expansion(mult = c(0.025, 0.025))) +
+  scale_y_continuous(labels = number_format(accuracy = 1, prefix = "x"), 
+                     position = "right") +
+  scale_colour_manual(values = search_type_colours) +
+  facet_grid(
+    cols = vars(object), 
+    scales = "free", 
+    labeller = as_labeller(function (string) paste("searches for", string))
+  ) +
+  labs(
+    x = NULL, 
+    y = "change in searches compared to Jan 2018"
+  ) +
+  theme_stop_search() +
+  theme(
+    axis.title.y = element_text(hjust = 0),
+    legend.position = "none"
+  )
+
+save_chart(
+  chart_types_change, 
+  "03_types_change",
+  str_glue(
+    "Change in number of searches by type, ",
+    "{format(min(stops$date), '%B %Y')} to {format(max(stops$date), '%B %Y')}"
+  )
+)
+
+chart_types_change
+```
+
+
+
+About `r percent(sum(pull(filter(janitor::adorn_percentages(filter(searches_by_type, year_quarter == max(year_quarter)), denominator = "col"), object %in% main_types), "n")))` of searches are looking for the four main types of contraband: `r vector_to_text(main_types)`. Since 2018, the number of searches for `r search_type_changes` (Figure \@ref(fig:chart-search-types-change)).
+
+
+
+```{r weapons trend, include=FALSE}
+weapon_search_counts <- stops %>% 
+  filter(
+    legislation %in% c(
+      "Police and Criminal Evidence Act 1984 (section 1)", 
+      "Criminal Justice and Public Order Act 1994 (section 60)"
+    ),
+    object_of_search %in% 
+      c("offensive weapons", "anything to threaten or harm anyone")
+  ) %>% 
+  count(legislation, year_month) %>% 
+  mutate(
+    year_month = as_date(year_month),
+    diff = n - lag(n),
+    diff_perc = diff / lag(n)
+  )
+  
+quarterly_weapon_search_counts <- weapon_search_counts %>% 
+  mutate(year_quarter = yearquarter(year_month)) %>% 
+  count(legislation, year_quarter, wt = n) %>% 
+  mutate(
+    year_quarter = as_date(year_quarter),
+    diff = n - lag(n),
+    diff_perc = diff / lag(n)
+  )
+  
+weapon_search_anomolies <- weapon_search_counts %>% 
+  group_by(legislation) %>% 
+  nest() %>% 
+  mutate(
+    anomalies = map(data, timetk::tk_anomaly_diagnostics, 
+                    .date_var = year_month, .value = n)
+  ) %>% 
+  unnest(cols = anomalies)
+
+weapon_search_trends <- weapon_search_counts %>% 
+  filter(year_month >= max(year_month) - months(24)) %>% 
+  group_by(legislation) %>% 
+  arrange(year_month) %>% 
+  mutate(
+    change = n / first(n),
+    year_month = as_date(year_month)
+  ) %>% 
+  ungroup() %>% 
+  as_tsibble(key = legislation, index = year_month) %>% 
+  model(lm = fable::TSLM(change ~ trend())) %>% 
+  mutate(coefs = map(lm, broom::tidy)) %>% 
+  unnest(cols = c(coefs)) %>% 
+  filter(term == "trend()")
+```
+
+
+
+Police can search people for weapons using two different legal powers. Searches under [section 1 of the Police and Criminal Evidence Act 1984](https://www.legislation.gov.uk/ukpga/1984/60/section/1) (PACE) require the officer to have "reasonable grounds for suspecting" that the person is carrying an offensive weapon or other prohibited item. Conversely, officers can search people under [section 60 of the Criminal Justice and Public Order Act 1994](https://www.legislation.gov.uk/ukpga/1994/33/section/60) (CJPOA) without having any reason to think the person has a weapon, as long as a more-senior officer believes "incidents involving serious violence may take place" in the area. These 'section 60' searches are particularly controversial because they allow officers to search *anyone* in an area, even if there is no reason to think they have a weapon in their possession. Between `r report_between`, `r percent(pull(filter(janitor::adorn_percentages(filter(quarterly_weapon_search_counts, year_quarter == max(year_quarter)), "col"), legislation == "Police and Criminal Evidence Act 1984 (section 1)"), "n"))` of weapons searches are based on reasonable suspicion under PACE section 1, with the remaining `r percent(pull(filter(janitor::adorn_percentages(filter(quarterly_weapon_search_counts, year_quarter == max(year_quarter)), "col"), legislation == "Criminal Justice and Public Order Act 1994 (section 60)"), "n"))` based on authorisations under CJPOA section 60. Police do not publish any information about authorisations made under section 60, so it is difficult to track any patterns or trends.
+
+
+
+(ref:chart-trend-weapons) Change in number of searches for weapons, `r format(min(stops$date), '%B %Y')` to `r format(max(stops$date), '%B %Y')`
+
+```{r chart-trend-weapons, fig.asp=0.5, fig.cap="(ref:chart-trend-weapons)"}
+weapon_search_chart_data <- weapon_search_anomolies %>% 
+  mutate(
+    legislation = recode_factor(
+      legislation,
+      "Police and Criminal Evidence Act 1984 (section 1)" = 
+        "searches under PACE s. 1\n(based on reasonable suspicion)", 
+      "Criminal Justice and Public Order Act 1994 (section 60)" = 
+        "searches under CJPOA s. 60\n(based on authorisation)"
+    )
+  )
+
+chart_trend_weapons <- ggplot(weapon_search_chart_data, 
+       aes(year_month, observed, colour = legislation)) +
+  geom_segment(aes(xend = year_month, yend = 1), size = 0.25, 
+               colour = "grey70") +
+  ggrepel::geom_label_repel(
+    aes(label = format(year_month, "%b %Y")),
+    data = filter(weapon_search_chart_data, anomaly == "Yes"),
+    box.padding = unit(1, "lines"),
+    direction = "x",
+    size = chart_elements$label_text_size,
+    label.size = NA
+  ) +
+  geom_point(size = 3, shape = 21, fill = "white", show.legend = FALSE,
+             data = filter(weapon_search_chart_data, anomaly == "Yes")) +
+  geom_point(size = 0.75) +
+  geom_smooth(method = "loess", formula = "y ~ x", se = FALSE, 
+              data = filter(weapon_search_chart_data, anomaly == "No")) +
+  scale_x_date(date_breaks = "6 months", date_labels = "%b '%y", 
+               expand = expansion(mult = c(0.025, 0.025))) +
+  scale_y_continuous(labels = comma_format(), limits = c(0, NA), 
+                     expand = expansion(mult = c(0, 0.025)), 
+                     position = "right") +
+  scale_colour_manual(
+    values = c(ucl_colours_list[["Light Red"]], 
+               ucl_colours_list[["Bright Pink"]])
+  ) +
+  facet_grid(
+    cols = vars(legislation), 
+    scales = "free"
+  ) +
+  labs(
+    x = NULL, 
+    y = "number of searches"
+  ) +
+  theme_stop_search() +
+  theme(
+    axis.title.y = element_text(hjust = 0),
+    legend.position = "none"
+  )
+
+save_chart(
+  chart_trend_weapons, 
+  "04_trend_weapons",
+  str_glue(
+    "Change in number of searches for weapons, ",
+    "{format(min(stops$date), '%B %Y')} to {format(max(stops$date), '%B %Y')}"
+  )
+)
+
+chart_trend_weapons
+```
+
+
+
+```{r}
+# SECTION 1
+weapon_trend_s1 <- weapon_search_trends %>% 
+  filter(legislation == "Police and Criminal Evidence Act 1984 (section 1)") %>% 
+  mutate(text = ifelse(
+    p.value < 0.05,
+    str_glue(
+      ifelse(estimate > 0, "increased", "decreased"), " by about ",
+      percent(abs(mean(pull(filter(weapon_search_counts, legislation == "Police and Criminal Evidence Act 1984 (section 1)", year_month >= max(year_month) - months(24)), diff_perc)))),
+      " per month on average"
+    ),
+    "remained largely static"
+  )) %>% pull(text)
+
+weapon_anomalies_s1 <- weapon_search_anomolies %>%
+  filter(
+    legislation == "Police and Criminal Evidence Act 1984 (section 1)",
+    anomaly == "Yes",
+    yearquarter(year_month) == max(yearquarter(year_month))
+  ) %>% 
+  mutate(
+    anomaly_text = ifelse(
+      remainder > 0, 
+      str_glue("anomalously high in {month(year_month, label = TRUE, abbr = FALSE)}"), 
+      str_glue("anomalously low in {month(year_month, label = TRUE, abbr = FALSE)}")
+    )
+  ) %>% 
+  pull(anomaly_text) %>% 
+  {
+    case_when(
+      length(.) == 3 ~ vector_to_text(.),
+      length(.) > 0 ~ as.character(str_glue("{vector_to_text(.)} and within the expected range otherwise")),
+      TRUE ~ "within the expected range"
+    )
+  }
+
+weapon_previous_anomalies_s1 <- weapon_search_anomolies %>% 
+  filter(
+    anomaly == "Yes", 
+    legislation == "Police and Criminal Evidence Act 1984 (section 1)", 
+    yearquarter(year_month) != max(yearquarter(year_month))
+  ) %>% 
+  mutate(high = remainder > 0) %>% 
+  {
+    
+    anm <- case_when(
+      sum(.$high) > 0 & sum(!.$high) > 0 ~ str_glue(
+        "anomalously high in ",
+        "{vector_to_text(format(.$year_month[.$high], '%B %Y'))} ",
+        "anomalously low in ",
+        "{vector_to_text(format(.$year_month[!.$high], '%B %Y'))} "
+      ),
+      sum(.$high) > 0 ~ str_glue(
+        "anomalously high in ",
+        "{vector_to_text(format(.$year_month[.$high], '%B %Y'))}"
+      ),
+      sum(!.$high) > 0 ~ str_glue(
+        "anomalously low in ",
+        "{vector_to_text(format(.$year_month[!.$high], '%B %Y'))}"
+      ),
+      TRUE ~ ""
+    )
+    
+    ifelse(
+      anm != "", 
+      str_glue(" -- prior to this quarter, PACE section 1 searches had been {anm}"),
+      ""
+    )
+    
+  }
+
+
+# SECTION 60
+weapon_trend_s60 <- weapon_search_trends %>% 
+  filter(legislation == "Criminal Justice and Public Order Act 1994 (section 60)") %>% 
+  mutate(text = ifelse(
+    p.value < 0.05,
+    str_glue(
+      ifelse(estimate > 0, "increased", "decreased"), " by about ",
+      percent(abs(mean(pull(filter(weapon_search_counts, legislation == "Criminal Justice and Public Order Act 1994 (section 60)", year_month >= max(year_month) - months(24)), diff_perc)))),
+      " per month on average"
+    ),
+    "remained largely static"
+  )) %>% pull(text)
+
+weapon_anomalies_s60 <- weapon_search_anomolies %>%
+  filter(
+    legislation == "Criminal Justice and Public Order Act 1994 (section 60)",
+    anomaly == "Yes",
+    yearquarter(year_month) == max(yearquarter(year_month))
+  ) %>% 
+  mutate(
+    anomaly_text = ifelse(
+      remainder > 0, 
+      str_glue("anomalously high in {month(year_month, label = TRUE, abbr = FALSE)}"), 
+      str_glue("anomalously low in {month(year_month, label = TRUE, abbr = FALSE)}")
+    )
+  ) %>% 
+  pull(anomaly_text) %>% 
+  {
+    case_when(
+      length(.) == 3 ~ as.character(str_glue("{vector_to_text(.)} compared to that trend")),
+      length(.) > 0 ~ as.character(str_glue("{vector_to_text(.)} compared to that trend, and within the expected range otherwise")),
+      TRUE ~ "within the range that would be expected based on that trend"
+    )
+  }
+
+weapon_previous_anomalies_s60 <- weapon_search_anomolies %>% 
+  filter(
+    anomaly == "Yes", 
+    legislation == "Criminal Justice and Public Order Act 1994 (section 60)", 
+    yearquarter(year_month) != max(yearquarter(year_month))
+  ) %>% 
+  mutate(high = remainder > 0) %>% 
+  {
+    
+    anm <- case_when(
+      sum(.$high) > 0 & sum(!.$high) > 0 ~ str_glue(
+        "anomalously high in ",
+        "{vector_to_text(format(.$year_month[.$high], '%B %Y'))} ",
+        "anomalously low in ",
+        "{vector_to_text(format(.$year_month[!.$high], '%B %Y'))} "
+      ),
+      sum(.$high) > 0 ~ str_glue(
+        "anomalously high in ",
+        "{vector_to_text(format(.$year_month[.$high], '%B %Y'))}"
+      ),
+      sum(!.$high) > 0 ~ str_glue(
+        "anomalously low in ",
+        "{vector_to_text(format(.$year_month[!.$high], '%B %Y'))}"
+      ),
+      TRUE ~ ""
+    )
+    
+    ifelse(
+      anm != "", 
+      str_glue("Before that, section 60 searches had been {anm}."),
+      ""
+    )
+    
+  }
+```
+
+
+
+Searches based on reasonable suspicion the person being searched is carrying a weapon have `r weapon_trend_s1` over the past two years (Figure \@ref(fig:chart-trend-weapons)). In comparison to that trend, the number of these searches in the `r describe_quarter(max(stops$date))` was `r weapon_anomalies_s1` `r weapon_previous_anomalies_s1`.
+No-suspicion searches under section 60 have `r weapon_trend_s60` over the past two years, with the number of these searches between `r report_between` `r weapon_anomalies_s60`. `r weapon_previous_anomalies_s60` The number of searches under section 60 is often higher in August because of searches associated with the Notting Hill Carnival.
+
+
+
+# Who do police search?
+
+Of the `r comma(pull(count(filter(person_stops, year_quarter == max(year_quarter))), n))` searches of pedestrians and vehicle occupants from `r report_period`, **`r percent(pull(filter(tabyl(filter(person_stops, gender %in% c("female", "male"), year_quarter == max(year_quarter)), gender), gender == "male"), percent))` were searches of men or boys**. Of all people searched, `r percent(sum(pull(filter(age_counts, age_range %in% c("under 10", "10-17")), percent)))` were aged under 18, `r percent(pull(filter(age_counts, age_range == "18-24"), percent))` were between 18 and 24, and `r percent(sum(pull(filter(age_counts, age_range %in% c("25-34", "over 34")), percent)))` were 25 or older. The self-defined ethnicity of the person searched was known for `r percent(1 - pull(filter(sde_counts, is.na(sde_group)), percent))` of searches, of which `r percent(pull(slice(sde_counts, 1), valid_percent))` of people described themselves as `r pull(slice(sde_counts, 1), sde_group)`, `r percent(pull(slice(sde_counts, 2), valid_percent))` as `r pull(slice(sde_counts, 2), sde_group)` and `r percent(pull(slice(sde_counts, 3), valid_percent))` as `r pull(slice(sde_counts, 3), sde_group)`.
+
+**Search rates vary hugely across different groups**. Of the `r nrow(stops_disparity)` combinations of sex, age and self-defined ethnicity present in the search data, `r nrow(filter(stops_disparity, search_rate > overall_search_rate))` groups were searched at a higher rate than the rate for the population as a whole (Figure \@ref(fig:chart-disparity)). While disparity between ethnic groups has generated much comment, `r ifelse(length(stops_model) > 0, str_glue("{vector_to_text(stops_model)} are more-powerful predictors of a group having a higher search rate than that group being non-white"), "there are also disparities between age groups and sexes")`. The reasons for these differences are likely to be complex: many types of offending are concentrated among some groups (particularly young men) as well as in some neighbourhoods, and there are [longstanding issues of bias and stereotyping among police and in society](https://www.bbc.co.uk/news/uk-47300343). There is also an interaction between factors such as deprivation and the amount of time people spend in public (where almost-all searches occur). There is no way to know from the data analysed here what combination of these factors drives the disparities in search rates.
+
+
+
+(ref:chart-disparity) Search rates for different demographic groups, `r report_period`
+
+```{r chart-disparity, fig.asp=0.5, fig.cap="(ref:chart-disparity)"}
+chart_disparity <- stops_disparity %>% 
+  arrange(desc(search_rate)) %>% 
+  # filter(sex == "male") %>% 
+  filter(search_rate > overall_search_rate) %>% 
+  add_row(group = "**all people**", search_rate = overall_search_rate) %>% 
+  mutate(
+    group = fct_relevel(fct_reorder(group, search_rate), "**all people**", 
+                        after = Inf)
+  ) %>% 
+  ggplot(aes(search_rate, group, fill = group == "**all people**")) +
+  geom_col(width = 0.75) +
+  geom_vline(
+    aes(xintercept = x),
+    data = tibble(
+      x = seq(0, ceiling(max(stops_disparity$search_rate)), by = 5)
+    ),
+    colour = "white",
+    alpha = 0.75
+  ) +
+  scale_x_continuous(expand = c(0, 0.05)) +
+  scale_fill_manual(
+    values = c(`TRUE` = "black", `FALSE` = ucl_colours_list[["Orange"]])
+  ) +
+  labs(
+    x = "searches per 1,000 people"
+  ) +
+  theme_stop_search() +
+  theme(
+    axis.text.y = element_markdown(),
+    axis.ticks.y = element_blank(),
+    axis.title.y = element_blank(),
+    legend.position = "none",
+    panel.grid = element_blank()
+  )
+
+save_chart(
+  chart_disparity, 
+  "05_disparity",
+  str_glue("Search rates for different demographic groups, {report_period}"),
+)
+
+chart_disparity
+```
+
+
+
+```{r}
+stops_disparity_object_chart <- stops_disparity_object %>%
+  group_by(object) %>%
+  mutate(
+    rel_search_rate = search_rate / (sum(searches) / (sum(people) / 1000))
+  ) %>%
+  ungroup() %>%
+  arrange(desc(rel_search_rate)) %>%
+  mutate(
+    object_label = recode(
+      object,
+      "weapons (based on authorisation)" = "weapons (s. 60)",
+      "weapons (based on reasonable suspicion)" = "weapons (s. 1)"
+    ),
+    group = str_glue("{group}"),
+    group = fct_reorder(group, rel_search_rate)
+  )
+
+disparity_groups_text <- stops_disparity_object_chart %>% 
+  arrange(desc(rel_search_rate)) %>% 
+  group_by(object) %>% 
+  slice(1) %>% 
+  ungroup() %>% 
+  {
+    
+    text <- case_when(
+      length(unique(.$group)) == 1 ~ 
+        str_glue("the rate of searches was highest for all five of the main ",
+                 "types of search for {.$age_label[1]} aged {.$age_range[1]} ",
+                 "who identified as {.$ethnic_group[1]}"),
+      length(unique(.$sex)) == 1 & length(unique(.$ethnic_group)) == 1 ~ 
+        str_glue("the rate of searches was highest for all five of the main ",
+                 "types of search for {.$age_label[1]} who identified as ",
+                 "{.$ethnic_group[1]}"),
+      length(unique(.$sex)) == 1 & length(unique(.$age_range)) == 1 ~ 
+        str_glue("the rate of searches was highest for all five of the main ",
+                 "types of search for {.$age_label[1]} aged {.$age_range[1]}"),
+      pluck(count(., age_range, ethnic_group, sex, sort = TRUE), "n", 1) > 2 ~
+        str_glue("the rate of searches was highest for ",
+                 "{number_to_text(pluck(arrange(count(., age_range, ethnic_group, sex), desc(n)), 'n', 1))} ",
+                 "of the five of the main types of search for ",
+                 "{.$age_label[1]} aged {.$age_range[1]} who identified as ",
+                 "{.$ethnic_group[1]}"),
+      pluck(count(., ethnic_group, sex, sort = TRUE), "n", 1) > 2 ~
+        str_glue("the rate of searches was highest for ",
+                 "{number_to_text(pluck(arrange(count(., age_range, ethnic_group, sex), desc(n)), 'n', 1))} ",
+                 "of the five of the main types of search for {.$age_label[1]} ",
+                 "who identified as {.$ethnic_group[1]}"),
+      pluck(count(., age_range, sex, sort = TRUE), "n", 1) > 2 ~
+        str_glue("the rate of searches was highest for ",
+                 "{number_to_text(pluck(arrange(count(., age_range, ethnic_group, sex), desc(n)), 'n', 1))} ",
+                 "of the five of the main types of search for {.$age_label[1]} ",
+                 "aged {.$age_range[1]}"),
+      TRUE ~ ""
+    )
+    
+    ifelse(
+      str_length(text) > 0,
+      str_glue("Of the {number(length(unique(stops_disparity_object$sex)) * length(unique(stops_disparity_object$age_range)) * length(unique(stops_disparity_object$ethnic_group)))} combinations of age, ethnic-group and sex categories present in the data, {text}."),
+      ""
+    )
+    
+  }
+
+```
+
+
+
+In comparison to the population as a whole, people in the group with the highest search rate (`r str_remove_all(pluck(arrange(stops_disparity, desc(search_rate)), "group", 1), "\\*\\*")`) are on-average `r number(pluck(arrange(stops_disparity, desc(search_rate)), "search_rate", 1) / overall_search_rate)` times more likely to be stopped and searched. Disparities in search rates also vary according to the type of search. Disparity is highest in searches for `r stops_disparity_object_chart$object[1]`, for which `r stops_disparity_object_chart$age_label[1]` aged `r stops_disparity_object_chart$age_range[1]` identifying as `r stops_disparity_object_chart$ethnic_group[1]` were `r number(stops_disparity_object_chart$rel_search_rate[1])` times more likely to be searched than the population at large. `r disparity_groups_text` It is important to note that these disparity ratios only represent _average_ search rates for different groups -- they do not reflect the individual experience of everyone in each group. It is likely that a small number of people in each group are being searched repeatedly while others are searched far less often, but since police do not publish data on repeated searches it is difficult to know how this affects overall search rates.
+
+
+
+```{r stops disparity object chart, eval=FALSE, fig.asp=0.75, include=FALSE}
+stops_disparity_object_chart %>% 
+  mutate(
+    age_range = fct_relevel(age_range, "over 34", "25-34", "18-24", "10-17"),
+    rate_label = number(rel_search_rate, accuracy = 0.1, prefix = "x"),
+    rel_search_rate = ifelse(rel_search_rate == 0, 0.01, rel_search_rate),
+    sex = recode(sex, female = "women and girls", male = "men and boys")
+  ) %>% 
+  ggplot(aes(object, age_range, fill = rel_search_rate, label = rate_label)) +
+  geom_raster(na.rm = TRUE) +
+  geom_text(size = chart_elements$label_text_size) +
+  scale_x_discrete(labels = function (x) str_wrap(x, 16)) +
+  scale_fill_gradient2(trans = "log", low = ucl_colours_list["Bright Blue"], 
+                       high = ucl_colours_list["Bright Red"], 
+                       midpoint = log(1), na.value = NA) +
+  facet_grid(cols = vars(sex), rows = vars(ethnic_group), scales = "free_y", 
+             switch = "y") +
+  labs(
+    title = str_glue("Search rates for demographic groups, relative to the ",
+                     "rate for all people, {report_period}"),
+    x = NULL, 
+    y = NULL
+  ) +
+  theme_stop_search() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    axis.ticks.x = element_blank(),
+    axis.ticks.y = element_blank(),
+    legend.position = "none",
+    panel.grid = element_blank(),
+    strip.placement = "outside",
+    strip.text = element_text(hjust = 0.5, vjust = 0.5)
+  )
+```
+
+
+
+# How often do police find items during searches?
+
+The purpose of stop and search is to "enable officers to allay or confirm suspicions about individuals without exercising their power of arrest" ([PACE Code A, paragraph 1.4](https://www.gov.uk/guidance/police-and-criminal-evidence-act-1984-pace-codes-of-practice)). As such, a search that does not find what is being searched for can be considered successful if it prevents an innocent person being arrested and a police officer being taken off the street unnecessarily. As such, there is not necessarily an optimal proportion of searches that should result in the officer finding what they are looking for. Measuring outcomes is also difficult: officers may have legitimate grounds to search a group of people (e.g. all the occupants in a vehicle believed to contain a firearm) when only one person has contraband in their possession. Nevertheless, all searches are an "intrusion on the liberty of the person" (PACE Code A, paragraph 1.2) and high proportions of searches that do not find anything may indicate that searches are not well targeted.
+
+The data released by the Home Office do not specify whether or not the item police were looking for was found during a search. Instead, we can measure whether a search resulted in some formal criminal-justice process. This is not a perfect measure of whether an item was found during a search, because a person might be arrested for some other reason (for example because there was an outstanding warrant for their arrest) or contraband might be found but police deal with it informally. Nevertheless, this is the least-worst measure of search outcomes that is currently available.
+
+```{r positive results}
+search_result_counts <- stops %>% 
+  mutate(
+    object = case_when(
+      object == "weapons" & 
+        legislation == "Police and Criminal Evidence Act 1984 (section 1)" ~ 
+        "weapons (based on reasonable suspicion)",
+      object == "weapons" & 
+        legislation == "Criminal Justice and Public Order Act 1994 (section 60)" ~ 
+        "weapons (based on authorisation)",
+      object == "weapons" ~ "unknown",
+      TRUE ~ object
+    ),
+    positive = !outcome %in% c("no further action", "unknown"),
+    year_month = as_date(year_month)
+  ) %>% 
+  filter(!object %in% c("other", "unknown"), outcome != "unknown") %>% 
+  count(year_month, object, positive) %>% 
+  group_by(year_month, object) %>% 
+  mutate(prop = n / sum(n)) %>% 
+  ungroup()
+
+search_result_quarter_counts <- stops %>% 
+  mutate(positive = !outcome %in% c("no further action", "unknown")) %>% 
+  count(year_quarter, positive) %>% 
+  group_by(year_quarter) %>% 
+  mutate(prop = n / sum(n)) %>% 
+  ungroup()
+
+search_result_month_counts <- stops %>% 
+  mutate(
+    positive = !outcome %in% c("no further action", "unknown"),
+    year_month = as_date(year_month)
+  ) %>% 
+  count(year_month, positive) %>% 
+  group_by(year_month) %>% 
+  mutate(prop = n / sum(n)) %>% 
+  ungroup()
+
+search_result_order <- search_result_counts %>% 
+  filter(positive, year_month > max(year_month) - months(24)) %>% 
+  group_by(object) %>% 
+  summarise(prop = mean(prop), .groups = "drop") %>% 
+  arrange(desc(prop))
+
+search_result_trends <- search_result_counts %>% 
+  filter(positive, year_month >= max(year_month) - months(24)) %>% 
+  group_by(object) %>% 
+  arrange(year_month) %>% 
+  mutate(
+    change = prop / first(prop),
+    year_month = as_date(year_month)
+  ) %>% 
+  ungroup() %>% 
+  as_tsibble(key = object, index = year_month) %>% 
+  model(lm = fable::TSLM(change ~ trend())) %>% 
+  mutate(coefs = map(lm, broom::tidy)) %>% 
+  unnest(cols = c(coefs)) %>% 
+  filter(term == "trend()", p.value < 0.05)
+
+search_result_month_trends <- search_result_month_counts %>%
+  filter(positive, year_month >= max(year_month) - months(24)) %>%
+  arrange(year_month) %>%
+  mutate(change = prop / first(prop)) %>% 
+  as_tsibble(index = year_month) %>% 
+  model(lm = fable::TSLM(change ~ trend())) %>% 
+  mutate(coefs = map(lm, broom::tidy)) %>% 
+  unnest(cols = c(coefs)) %>% 
+  filter(term == "trend()", p.value < 0.05)
+```
+
+
+
+(ref:chart-results) Change in proportion of searches with a formal outcome, `r format(min(stops$date), '%B %Y')` to `r format(max(stops$date), '%B %Y')`
+
+```{r chart-results, fig.asp=0.5, fig.cap="(ref:chart-results)"}
+chart_hit_rate <- search_result_counts %>% 
+  filter(positive) %>%
+  mutate(object = fct_relevel(object, pull(search_result_order, object))) %>% 
+  ggplot(aes(year_month, prop, colour = object)) +
+  geom_segment(aes(xend = year_month, yend = 0), size = 0.25, 
+               colour = "grey70") +
+  geom_point(size = 0.75) +
+  geom_smooth(method = "loess", formula = "y ~ x", se = FALSE) +
+  scale_x_date(date_breaks = "1 year", date_labels = "'%y",
+               expand = expansion(mult = c(0.025, 0.025))) +
+  scale_y_continuous(labels = percent_format(accuracy = 1),
+                     expand = expansion(mult = c(0, 0.025)), 
+                     position = "right") +
+  scale_colour_manual(values = search_type_colours) +
+  facet_grid(
+    cols = vars(object),
+    labeller = as_labeller(function (string) {
+      str_wrap(paste("searches for", string), 18)
+    })
+  ) +
+  labs(
+    x = NULL, 
+    y = "proportion resulting in a formal outcome"
+  ) +
+  theme_stop_search() +
+  theme(
+    axis.title.y = element_text(hjust = 0),
+    legend.position = "none"
+  )
+
+save_chart(
+  chart_hit_rate, 
+  "06_hit_rate",
+  str_glue(
+    "Change in proportion of searches with a formal outcome, ",
+    "{format(min(stops$date), '%B %Y')} to {format(max(stops$date), '%B %Y')}"
+  )
+)
+
+chart_hit_rate
+```
+
+
+
+```{r}
+search_result_trend_text <- case_when(
+  nrow(filter(search_result_trends, estimate > 0)) > 0 & nrow(filter(search_result_trends, estimate < 0)) > 0 ~ 
+    str_glue("for ", vector_to_text(pull(filter(search_result_trends, estimate > 0), object)), " resulting in a formal outcome increased while the proportion of searches for ", vector_to_text(pull(filter(search_result_trends, estimate < 0), object)), " resulting in a formal outcome decreased"), 
+  nrow(filter(search_result_trends, estimate > 0)) > 0 ~ 
+    str_glue("for ", vector_to_text(pull(filter(search_result_trends, estimate > 0), object)), " resulting in a formal outcome have", ifelse(nrow(filter(search_result_trends, estimate > 0)) > 2, " all ", " "), "increased"), 
+  nrow(filter(search_result_trends, estimate < 0)) > 0 ~ 
+    str_glue("for ", vector_to_text(pull(filter(search_result_trends, estimate < 0), object)), " resulting in a formal outcome have", ifelse(nrow(filter(search_result_trends, estimate < 0)) > 2, " all ", " "), "decreased"), 
+  TRUE ~ "leading to a formal outcome has remained largely constant"
+)
+```
+
+
+
+Overall, about `r percent(tail(search_result_quarter_counts$prop, 1))` of searches in the `r describe_quarter(max(stops$date))` resulted in a formal criminal-justice outcome (arrest, charge by post, caution, fixed penalty, community/local resolution or drugs warning), while the remaining **`r percent(1 - tail(search_result_quarter_counts$prop, 1))` of searches resulted in no further action.** Over the past two years, searches for `r head(search_result_order$object, 1)` have been most likely to lead to a formal outcome, while `r percent(1 - tail(search_result_order$prop, 1))` of searches for `r ifelse(tail(search_result_order$object, 1) == "weapons (based on authorisation)", "weapons under a section 60 authorisation", tail(search_result_order$object, 1))` resulted in no further action.
+
+In the past two years, the proportion of searches `r search_result_trend_text` (Figure \@ref(fig:chart-results)). `r ifelse(search_result_month_trends$p.value < 0.05, str_glue("Overall, **the proportion of stops with a formal outcome has ", ifelse(search_result_month_trends$estimate > 0, "risen", "dropped"), " from ", percent(mean(pull(filter(search_result_month_counts, positive, year(year_month) == 2018), prop))), " in 2018 to ", percent(mean(pull(filter(search_result_month_counts, positive, year_month > max(year_month) - months(6)), prop))), " in the past 6 months**."), "")`
+
+
+
+```{r results by type}
+results_by_type <- stops %>% 
+  mutate(
+    object = case_when(
+      object == "weapons" & 
+        legislation == "Police and Criminal Evidence Act 1984 (section 1)" ~ 
+        "weapons (based on reasonable suspicion)",
+      object == "weapons" & 
+        legislation == "Criminal Justice and Public Order Act 1994 (section 60)" ~ 
+        "weapons (based on authorisation)",
+      object == "weapons" ~ "unknown",
+      TRUE ~ object
+    ),
+    outcome = fct_rev(recode(
+      outcome, 
+      "community/local resolution" = "community resolution"
+    ))
+  ) %>% 
+  filter(
+    !object %in% c("other", "unknown"), 
+    !outcome %in% c("no further action", "unknown", "drugs warning", "caution"), 
+    year_quarter == max(year_quarter)
+  ) %>% 
+  count(object, outcome) %>% 
+  group_by(object) %>% 
+  mutate(prop = n / sum(n)) %>% 
+  ungroup()
+
+most_common_outcome <- stops %>% 
+  filter(!outcome %in% c("no further action", "unknown")) %>% 
+  count(outcome, sort = TRUE) %>% 
+  head(1) %>% 
+  pull(outcome) %>% 
+  as.character()
+```
+
+
+
+When a stop does result in formal action, the most common outcome is `r most_common_outcome` (used in `r percent(head(pull(janitor::adorn_percentages(count(filter(stops, !outcome %in% c("no further action", "unknown")), outcome, sort = TRUE), "col"), n), 1))` of cases with a formal outcome). However, which action police choose varies with the type of search: `r percent(pull(head(arrange(filter(results_by_type, outcome == most_common_outcome), desc(prop)), 1), prop))` of positive searches for `r pull(head(arrange(filter(results_by_type, outcome == most_common_outcome), desc(prop)), 1), object)` result in `r most_common_outcome`, compared to only `r percent(pull(tail(arrange(filter(results_by_type, outcome == most_common_outcome), desc(prop)), 1), prop))` of positive searches for `r pull(tail(arrange(filter(results_by_type, outcome == most_common_outcome), desc(prop)), 1), object)`. The outcomes of some searches suggest that the outcome does not relate to the type of contraband that police were looking for. For example, fixed penalties are not a legally available option for dealing with weapons or firearms offences, but `r percent(pull(filter(results_by_type, outcome == "fixed penalty", object == "weapons (based on reasonable suspicion)"), prop))` of formal outcomes to searches for weapons based on reasonable suspicion, `r percent(pull(filter(results_by_type, outcome == "fixed penalty", object == "weapons (based on authorisation)"), prop))` of formal outcomes to searches for weapons based on section-60 authorisations and `r percent(pull(filter(results_by_type, outcome == "fixed penalty", object == "firearms"), prop))` of formal outcomes to searches for firearms were fixed penalties. This suggests that some weapons and firearms searches result in police not finding weapons but discovering more-minor offences such as cannabis possession.
+
+
+
+```{r results by type chart, eval=FALSE, fig.asp=0.67, include=FALSE}
+ggplot(
+  results_by_type, 
+  aes(prop, outcome, fill = outcome, 
+      label = str_glue(" {percent(prop, accuracy = 1)}"))
+) +
+  geom_col() +
+  geom_text(
+    colour = chart_elements$label_text_colour,
+    size = chart_elements$label_text_size,
+    hjust = 0
+  ) +
+  scale_x_continuous(
+    limits = c(0, 1),
+    expand = expansion(mult = c(0, 0.02)), 
+    labels = percent_format()
+  ) +
+  scale_fill_manual(
+    values = unname(ucl_colours_list[c("Bright Green", "Bright Blue", 
+                                       "Bright Green", "Light Blue")])
+  ) +
+  facet_grid(rows = vars(object), labeller = label_wrap_gen(width = 12)) +
+  labs(
+    title = str_glue("Formal outcomes for different types of search, ",
+                     "{report_span}"),
+    x = "proportion of all searches resulting in a formal outcome",
+    y = NULL
+  ) +
+  theme_stop_search() +
+  theme(
+    panel.grid.major.x = element_line(),
+    panel.grid.major.y = element_blank(),
+    legend.position = "none"
+  )
+```
+
+
+
+```{r outcomes by ethnicity}
+stops_by_ethnicity <- stops %>% 
+  separate(self_defined_ethnicity, c("ethnic_group", "ethnicity"), " - ") %>% 
+  mutate(
+    ethnic_group = str_extract(ethnic_group, "^\\w+"),
+    formal_disposal = outcome != "no further action",
+    object = case_when(
+      object == "weapons" & 
+        legislation == "Police and Criminal Evidence Act 1984 (section 1)" ~ 
+        "weapons (based on reasonable suspicion)",
+      object == "weapons" & 
+        legislation == "Criminal Justice and Public Order Act 1994 (section 60)" ~ 
+        "weapons (based on authorisation)",
+      object == "weapons" ~ "unknown",
+      TRUE ~ object
+    )
+  ) %>% 
+  filter(
+    !is.na(ethnic_group),
+    !object %in% c("other", "unknown"), 
+    outcome != "unknown",
+    as_date(year_month) > as_date(max(year_month)) - months(5)
+  )
+
+outcomes_by_ethnicity <- stops_by_ethnicity %>% 
+  count(object, formal_disposal, ethnic_group) %>% 
+  mutate_if(is.factor, as.character) %>% 
+  pivot_wider(names_from = formal_disposal, values_from = n) %>% 
+  replace_na(list(`TRUE` = 0, `FALSE` = 0)) %>% 
+  mutate(prop = `TRUE` / (`FALSE` + `TRUE`))
+
+outcomes_by_ethnicity_order <- outcomes_by_ethnicity %>% 
+  filter(object == "drugs") %>% 
+  arrange(prop) %>% 
+  pull(ethnic_group)
+
+outcomes_by_ethnicity_model <- stops_by_ethnicity %>% 
+  mutate(ethnic_group = fct_relevel(ethnic_group, "White")) %>% 
+  nest(data = -object) %>% 
+  mutate(model = map(data, function (x) {
+    broom::tidy(glm(formal_disposal ~ ethnic_group, data = x))
+  })) %>% 
+  select(object, model) %>% 
+  unnest(cols = model) %>% 
+  filter(term %in% c("ethnic_groupAsian", "ethnic_groupBlack")) %>% 
+  mutate(
+    odds_ratio = exp(estimate),
+    sig = p.value < 0.05 & !between(odds_ratio, 0.95, 1.05),
+    search_type = str_glue("searches of {str_remove(term, '^ethnic_group')} ",
+                           "people for {object}"),
+    diff_type = ifelse(odds_ratio > 1, str_glue("higher for {search_type}"), 
+                       str_glue("lower for {search_type}"))
+  )
+```
+
+
+
+`r ifelse(sum(outcomes_by_ethnicity_model$sig) / length(outcomes_by_ethnicity_model$sig) > 0.5, str_glue("Just as some ethnic groups are more likely to be stopped than others, the probability of a stop resulting in a formal criminal-justice outcome also varies by ethnicity: over the past six months, the probability of a formal outcome to a search is {vector_to_text(pull(arrange(filter(outcomes_by_ethnicity_model, sig), desc(odds_ratio)), diff_type))}"), paste0("While the rate of searches varies between ethnic groups, the probability of a search resulting in a formal criminal-justice outcome is broadly the same across ethnicities – over the past six months, ", ifelse(sum(outcomes_by_ethnicity_model$sig) > 0, str_glue("the probability of a formal outcome to searches of Black or Asian people is only significantly different from the probabilty of a formal outcome to searches of White people for {vector_to_text(pull(filter(outcomes_by_ethnicity_model, sig), search_type))}"), "the probability of a formal outcome to searches of Black or Asian people was not significantly different from the probabilty of a formal outcome to searches of White people for any of the main search types"), ""))` (Figure \@ref(fig:chart-outcomes-ethnicity)).
+
+
+
+(ref:chart-outcomes-ethnicity) Proportion of searches resulting in a formal outcome, `r ifelse(format(max(stops$year_month), '%Y') == format(as_date(max(stops$year_month)) - months(5), '%Y'), format(as_date(max(stops$year_month)) - months(5), '%B'), format(as_date(max(stops$year_month)) - months(5), '%B %Y'))` to `r format(max(stops$year_month), '%B %Y')`
+
+```{r chart-outcomes-ethnicity, fig.asp=0.33, fig.cap="(ref:chart-outcomes-ethnicity)"}
+chart_outcomes_ethnicity <- outcomes_by_ethnicity %>% 
+  mutate(
+    ethnic_group = fct_relevel(as.character(ethnic_group), 
+                               outcomes_by_ethnicity_order),
+    prop_label = percent(prop, accuracy = 1, prefix = " ", suffix = "% "),
+    align = ifelse(prop > max(prop) / 2, 1, 0)
+  ) %>% 
+  ggplot(aes(prop, ethnic_group, colour = as.logical(align), fill = object, 
+             label = prop_label, hjust = align)) +
+  geom_col(colour = NA) +
+  geom_text(size = chart_elements$label_text_size) +
+  scale_x_continuous(breaks = c(0, 0.1, 0.2), labels = percent_format()) +
+  scale_colour_manual(
+    values = c(`FALSE` = chart_elements$label_text_colour, `TRUE` = "white")
+  ) +
+  scale_fill_manual(values = search_type_colours) +
+  facet_grid(cols = vars(object), labeller = label_wrap_gen(width = 16)) +
+  labs(
+    x = NULL,
+    y = NULL
+  ) +
+  theme_stop_search() +
+  theme(
+    axis.ticks.y = element_blank(),
+    legend.position = "none",
+    panel.grid.major.x = element_line(),
+    panel.grid.major.y = element_blank()
+  )
+
+save_chart(
+  chart_outcomes_ethnicity, 
+  "07_chart_outcomes_ethnicity",
+  str_glue(
+    "Proportion of searches resulting in a formal outcome, ", 
+    "{ifelse(format(max(stops$year_month), '%Y') == format(as_date(max(stops$year_month)) - months(5), '%Y'), format(as_date(max(stops$year_month)) - months(5), '%B'), format(as_date(max(stops$year_month)) - months(5), '%B %Y'))}",
+    " to {format(max(stops$year_month), '%B %Y')}"
+  )
+)
+
+chart_outcomes_ethnicity
+```
+
+
+
+# Where do stops happen?
+
+```{r deprivation, include=FALSE}
+stops_by_deprivation <- stops_by_lsoa %>% 
+  count(lsoa_code, name = "searches") %>% 
+  left_join(imd, by = "lsoa_code") %>% 
+  mutate(imd_perc = ceiling(imd_perc * 100)) %>% 
+  arrange(imd_perc) %>% 
+  count(imd_perc, wt = searches, name = "searches") %>% 
+  mutate(
+    csum_searches = cumsum(searches),
+    csum_searches = csum_searches / max(csum_searches)
+  ) %>% 
+  filter(imd_perc == 50) %>% 
+  slice(1) %>% 
+  pull(csum_searches)
+
+stops_by_deprivation_object <- stops_by_lsoa %>% 
+  filter(
+    object %in% c("drugs", "firearms", "stolen goods", 
+                  "weapons under section 1", "weapons under section 60")
+  ) %>% 
+  count(object, lsoa_code, name = "searches") %>% 
+  left_join(imd, by = "lsoa_code") %>% 
+  mutate(imd_perc = ceiling(imd_perc * 100)) %>% 
+  arrange(imd_perc) %>% 
+  count(object, imd_perc, wt = searches, name = "searches") %>% 
+  group_by(object) %>% 
+  mutate(
+    csum_searches = cumsum(searches),
+    csum_searches = csum_searches / max(csum_searches)
+  ) %>% 
+  filter(imd_perc == 50) %>% 
+  slice(1) %>% 
+  ungroup() %>% 
+  arrange(desc(csum_searches))
+```
+
+
+
+```{r prepare hotspots, include=FALSE}
+grid <- london_outline %>% 
+  st_transform(27700) %>% 
+  st_make_grid(cellsize = 1000, square = FALSE) %>% 
+  st_sf() %>% 
+  st_intersection(london_outline) %>% 
+  mutate(id = row_number())
+
+grid_stops <- stops %>% 
+  filter(
+    !is.na(latitude), 
+    !is.na(longitude), 
+    year_quarter == max(year_quarter)
+  ) %>% 
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>% 
+  st_transform(27700) %>% 
+  st_join(grid) %>% 
+  as_tibble() %>% 
+  count(id, name = "searches") %>% 
+  full_join(grid, by = "id") %>% 
+  filter(!is.na(id)) %>% 
+  mutate(searches = ifelse(searches == 0 | is.na(searches), NA, searches)) %>%
+  st_sf()
+
+hotspot_labels <- grid_stops %>% 
+  arrange(desc(searches)) %>% 
+  slice(1:20) %>% 
+  st_centroid() %>% 
+  mutate(
+    coord_x = st_coordinates(.)[, 1], 
+    coord_y = st_coordinates(.)[, 2],
+    nearest_station_id = st_nearest_feature(., london_stations)
+  ) %>% 
+  left_join(
+    st_set_geometry(london_stations, NULL), 
+    by = c("nearest_station_id" = "id")
+  ) %>% 
+  as_tibble() %>% 
+  distinct(name, .keep_all = TRUE) %>% 
+  head(12) %>%
+  mutate(label = str_glue("{ordinal(row_number())}. {name}"))
+```
+
+
+
+Stop and search is geographically concentrated in some parts of London: **half of searches between `r report_between` occurred in `r percent(stop_concentration)` of neighbourhoods**. `r ifelse(stops_by_deprivation < 45, str_glue("Searches are also concentrated in deprived areas: {percent(stops_by_deprivation)} of searches took place in neighbourhoods that were more deprived than average.", ifelse(max(stops_by_deprivation_object$csum_searches) > stops_by_deprivation + 0.03, str_glue(" In particular, {percent(pull(slice(stops_by_deprivation_object, 1), csum_searches))} of searches for {pull(slice(stops_by_deprivation_object, 1), object)} occurred in the most-deprived half of neighbourhoods."), "")), "")`
+
+Of the 33 boroughs in London, the most searches in `r report_period` took place in `r pull(slice(searches_by_borough, 1), borough)` (`r comma(pull(slice(searches_by_borough, 1), searches))` searches), `r pull(slice(searches_by_borough, 2), borough)` (`r comma(pull(slice(searches_by_borough, 2), searches))`) and `r pull(slice(searches_by_borough, 3), borough)` (`r comma(pull(slice(searches_by_borough, 3), searches))`), while the fewest took place in `r pull(slice(searches_by_borough, 33), borough)` (`r comma(pull(slice(searches_by_borough, 33), searches))` searches), `r pull(slice(searches_by_borough, 32), borough)` (`r comma(pull(slice(searches_by_borough, 32), searches))`) and `r pull(slice(searches_by_borough, 31), borough)` (`r comma(pull(slice(searches_by_borough, 31), searches))`). We can identify search hotspots by counting searches in each of about `r comma(nrow(grid), accuracy = 1000)` equally-sized cells (Figure \@ref(fig:chart-map)).
+
+Of the `r comma(nrow(london_wards))` local-authority wards in London, the ward with the most searches between `r report_between` was `r searches_by_ward$ward[1]` ward in `r searches_by_ward$borough[1]`, in which there were more searches than in `r places_less_than_top_ward` (Table \@ref(tab:table-ward)).
+
+
+
+```{r section 60 by borough}
+s60_by_borough <- stops %>% 
+  filter(
+    !is.na(latitude), 
+    !is.na(longitude), 
+    year_quarter == max(year_quarter), 
+    legislation == "Criminal Justice and Public Order Act 1994 (section 60)"
+  ) %>% 
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>% 
+  st_transform(27700) %>% 
+  st_join(london_boroughs) %>% 
+  as_tibble() %>% 
+  count(borough, name = "searches") %>% 
+  filter(!is.na(borough)) %>% 
+  arrange(desc(searches)) %>% 
+  mutate(
+    perc = searches / sum(searches),
+    csum_perc = cumsum(perc),
+    less_than_half = row_number() == 1 | lag(csum_perc) < 0.5,
+    label = str_glue("{percent(perc, accuracy = 1)} in {borough}")
+  )
+```
+
+
+
+Searches for weapons under section 60 can only take place in areas in which an inspector (a second-line supervisor) believes "incidents involving serious violence may take place". Of the `r comma(nrow(filter(stops, year_quarter == max(year_quarter), legislation == "Criminal Justice and Public Order Act 1994 (section 60)")))` no-suspicion searches under section 60 from `r report_period`, more than half (`r percent(tail(pull(filter(s60_by_borough, less_than_half), csum_perc), 1))`) took place in `r number_to_text(nrow(filter(s60_by_borough, less_than_half)))` boroughs`r ifelse(nrow(filter(s60_by_borough, less_than_half)) <= 5, str_glue(" ({vector_to_text(pull(filter(s60_by_borough, less_than_half), label))})"), "")`. `r case_when(length(setdiff(london_boroughs$borough, s60_by_borough$borough)) > 10 ~ str_glue("Meanwhile, there were no section-60 searches in {number_to_text(length(setdiff(london_boroughs$borough, s60_by_borough$borough)))} other boroughs."), length(setdiff(london_boroughs$borough, s60_by_borough$borough)) > 0 ~ str_glue("Meanwhile, there were no section-60 searches in {vector_to_text(setdiff(london_boroughs$borough, s60_by_borough$borough), final_sep = ' or ')} boroughs."), TRUE ~ "")`
+
+
+
+# A note on data
+
+This report uses data published by the Home Office at [data.police.uk](https://data.police.uk/) under the [Open Government Licence version 3.0](https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/) for searches conducted by the Metropolitan Police Service or City of London Police, or by British Transport Police at a location in London.
+
+Search rates are calculated using [2020 estimates of the London population by age and ethnic group](https://data.london.gov.uk/dataset/ethnic-group-population-projections) produced by the Mayor of London. Rates based on residential populations are imperfect because some people being searched in London will live outside London, but the vast majority of people searched in London are likely to also live in the region. All ethnicity figures in this report are self-defined ethnicities.
+
+This report is published under a [Creative Commons Attribution Licence version 4.0](https://creativecommons.org/licenses/by/4.0/), meaning you are free to copy or redistribute this material in any medium or format, and to remix, transform, and build upon this material for any purpose, even commercially, as long as you comply with the licence terms.
+
+Thank you to Ben Bradford, Gavin Hales and Paul Quinton for comments on drafts of this report. Cover photo by [James Padolsey on Unsplash.com](https://unsplash.com/photos/tvPvROBv0F4)
+
+
+
+\newgeometry{top = 2cm, inner = 1cm, bottom = 3cm, outer = 1cm}
+
+(ref:chart-map) Location of searches, `r report_period`
+
+```{r chart-map, fig.asp=1, fig.cap="(ref:chart-map)", out.width="19cm"}
+chart_map <- grid_stops %>% 
+  ggplot(aes(colour = searches, fill = searches)) +
+  geom_sf() +
+  geom_sf(data = london_boroughs, colour = "grey80", fill = NA, size = 0.2) +
+  geom_sf_text(
+    aes(label = str_wrap(str_replace(borough, " and ", " & "), 10)),
+    data = london_boroughs,
+    colour = chart_elements$label_text_colour,
+    size = chart_elements$label_text_size * 0.8,
+    lineheight = chart_elements$label_text_lineheight,
+    inherit.aes = FALSE,
+    check_overlap = TRUE
+  ) +
+  # West London labels to the left
+  ggrepel::geom_label_repel(
+    aes(x = coord_x, y = coord_y, label = str_wrap(label, 15)),
+    data = filter(hotspot_labels, coord_x < median(coord_x)),
+    colour = chart_elements$label_text_colour,
+    fill = "white",
+    size = chart_elements$label_text_size,
+    lineheight = chart_elements$label_text_lineheight,
+    hjust = 1,
+    box.padding = unit(2, "lines"),
+    label.padding = unit(0.2, "lines"),
+    label.size = NA,
+    xlim = c(NA, min(hotspot_labels$coord_x)),
+    max.iter = 10000
+  ) +
+  # East London labels to the right
+  ggrepel::geom_label_repel(
+    aes(x = coord_x, y = coord_y, label = str_wrap(label, 15)),
+    data = filter(hotspot_labels, coord_x >= median(coord_x)),
+    colour = chart_elements$label_text_colour,
+    fill = "white",
+    size = chart_elements$label_text_size,
+    lineheight = chart_elements$label_text_lineheight,
+    hjust = 0,
+    box.padding = unit(2, "lines"),
+    label.padding = unit(0.2, "lines"),
+    label.size = NA,
+    xlim = c(max(hotspot_labels$coord_x), NA),
+    max.iter = 10000
+  ) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_colour_distiller(aesthetics = c("colour", "fill"), palette = "Oranges", 
+                         direction = 1, na.value = "grey90") +
+  labs(
+    colour = str_glue("number of\nsearches"),
+    fill = str_glue("number of\nsearches")
+  ) +
+  theme_stop_search() +
+  theme(
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    axis.title = element_blank(),
+    legend.justification = c(0, 0),
+    legend.position = c(0, 0),
+    panel.grid = element_blank()
+  )
+
+save_chart(
+  chart_map, 
+  "08_chart_map", 
+  str_glue("Location of searches, {report_period}"),
+  height = 600, 
+  width = 600
+)
+
+chart_map
+
+```
+
+
+
+```{r table-ward}
+searches_by_ward %>% 
+  mutate(
+    searches = comma(searches, accuracy = 1),
+    ward = str_glue("{row_number()}. {ward} ward, {borough}")
+  ) %>% 
+  select(`council ward` = ward, searches) %>% 
+  head(12) %>% 
+  # {
+  #   list(slice(., 1:10), slice(., 11:20))
+  # } %>% 
+  knitr::kable(
+    format = "latex",
+    align = "lr", 
+    booktabs = TRUE,
+    caption = str_glue("Local authority wards with the ",
+                       "highest number of searches, {report_period}"),
+    linesep = ""
+  )
+```
+
+
+
+```{r write tweets}
+tweets <- vector()
+
+tweets[1] <- str_glue(
+  "Today @IGCP_UCL releases the first quarterly report on how #stopsearch is ",
+  "used by @metpoliceuk @BTPLondon and @CityPolice in London, using #opendata ",
+  "from police.uk to bring evidence to the debate on #stopandsearch\n\n",
+  "Report: https://bit.ly/stop-search-london\n\nThread …\n\n",
+  "[{report_q}_00_cover.png]\n\nALT: Cover image for stop and search report"
+)
+
+tweets[2] <- str_glue(
+  "From {report_span}, police in London searched {comma(total_searches)}",
+  " people and vehicles, or about ",
+  comma(total_searches / days_in_quarter, accuracy = 10),
+  " each day. The number of searches has generally ",
+  ifelse(monthly_counts_feats$linearity > 0, "increased", "decreased"),
+  " over the past two years.\n\n[{report_q}_01_trend.png]\n\nALT: Bar chart ",
+  "showing change in the frequency of stop and search over time"
+)
+
+search_count_by_type <- stops %>% 
+  filter(year_quarter == max(year_quarter)) %>% 
+  count(object) %>% 
+  janitor::adorn_percentages(denominator = "col") %>% 
+  arrange(desc(n))
+
+tweets[3] <- str_glue(
+  "About {percent(pluck(search_count_by_type, 'n', 1))} of all searches are ",
+  "for {pluck(search_count_by_type, 'object', 1)}, ",
+  "{percent(pluck(search_count_by_type, 'n', 2))} for ",
+  "{pluck(search_count_by_type, 'object', 2)} and ",
+  "{percent(pluck(search_count_by_type, 'n', 3))} for ",
+  "{pluck(search_count_by_type, 'object', 3)}. Since 2018, searches for ",
+  "{search_type_changes}.\n\n[{report_q}_02_types.png and ",
+  "{report_q}_03_types_change.png]\n\nALT: Bar chart showing proportion of ", 
+  "searches by type\nALT: Line chart showing changes in the frequency of ", 
+  "different types of stop and search over time"
+)
+
+weapons_searches_by_power <- weapon_search_counts %>% 
+  filter(year_month > max(year_month) - months(3)) %>% 
+  count(legislation, wt = n) %>% 
+  mutate(legislation = str_extract(legislation, "\\(.+?\\)")) %>% 
+  deframe()
+
+tweets[4] <- str_glue(
+  "From {report_period}, police searched ",
+  "{comma(weapons_searches_by_power['(section 1)'])} people they suspected ",
+  "of carrying weapons, along with ",
+  "{comma(weapons_searches_by_power['(section 60)'])} people without ",
+  "reasonable suspicion in areas where a mid-ranking officer believed some ",
+  "people might carry weapons.\n\n[{report_q}_04_trend_weapons.png]\n\nALT: ",
+  "Line chart showing changes in the frequency of searches for weapons over ",
+  "time"
+)
+
+tweets[5] <- str_glue(
+  "Different groups are searched at different rates – ",
+  "{str_remove_all(pluck(arrange(stops_disparity, desc(search_rate)), 'group', 1), '\\\\*\\\\*')} ",
+  "were on-average ",
+  "{number(pluck(arrange(stops_disparity, desc(search_rate)), 'search_rate', 1) / overall_search_rate)} times ",
+  "more likely to be searched than the population at large. The reasons for ",
+  "this are likely to be a complex mix of different factors, with no single ",
+  "cause.\n\n[{report_q}_05_disparity.png]\n\nALT: Bar chart showing rates at ",
+  "which different demographic groups are searched"
+)
+
+tweets[6] <- str_glue(
+  "{percent(1 - tail(search_result_quarter_counts$prop, 1))} of searches in ",
+  "{report_period} resulted in no further action. In the past two years, the ",
+  "proportion of searches, ",
+  str_replace(
+    search_result_trend_text, 
+    "resulting in a formal outcome", 
+    "resulting in a formal outcome (e.g. arrest)"
+  ),
+  ".\n\n[{report_q}_06_hit_rate.png]\n\nALT: Line chart showing how the ",
+  "proportion of searches resulting in a formal criminal-justice outcome has ",
+  "changed over time"
+)
+
+tweets[7] <- ifelse(
+  sum(outcomes_by_ethnicity_model$sig) / length(outcomes_by_ethnicity_model$sig) > 0.5, 
+  str_glue(
+    "Stops of people from some ethnic groups are more likely to lead to a ",
+    "formal criminal-justice outcome: the probability of a formal outcome to ",
+    "is {vector_to_text(pull(arrange(filter(outcomes_by_ethnicity_model, sig), desc(odds_ratio)), diff_type))}",
+    "\n\n[{report_q}_07_chart_outcomes_ethnicity.png]"
+  ),
+  paste0(
+    "The likelihood of searches having a formal criminal-justice outcome is ",
+    "similar across ethnicities – over the past six months, ",
+    ifelse(
+      sum(outcomes_by_ethnicity_model$sig) > 0, 
+      str_glue(
+        "the probability of a formal outcome was similar across ethnic ",
+        "groups, except for ",
+        "{vector_to_text(pull(filter(outcomes_by_ethnicity_model, sig), search_type))}"
+      ),
+      "the probability of a formal outcome to searches of Black or Asian people was not significantly different from the probabilty of a formal outcome to searches of White people for any of the main search types"
+    ),
+    str_glue(
+      "\n\n[{report_q}_07_chart_outcomes_ethnicity.png]\n\nALT: Bar charts ", 
+      "showing the proportion of searches of different types resulting in a ", 
+      "formal criminal-justice outcome varies across ethnic groups"
+    )
+  )
+)
+
+tweets[8] <- str_glue(
+  "Half of searches from {report_period} occurred in ",
+  "{percent(stop_concentration)} of neighbourhoods – there were more searches ",
+  "in {searches_by_ward$ward[1]} ward in {searches_by_ward$borough[1]} than in",
+  "{places_less_than_top_ward}\n\n[{report_q}_08_chart_map.png]\n\nALT: Map ",
+  "showing where stop and searches are concentrated in London"
+)
+
+tweets[9] <- str_glue(
+  "The full report is available at https://bit.ly/stop-search-london\n\n",
+  "We'll update the report every quarter to provide the latest analysis of",
+  "stop and search in London\n\n[{report_q}_00_cover.png]\n\nALT: Cover image ",
+  "for stop and search report"
+)
+
+tweets %>% 
+  paste(collapse = "\n\n-----\n\n") %>% 
+  write_file(str_glue("{report_q}_tweets.md"))
+```
+
+
+
+\restoregeometry

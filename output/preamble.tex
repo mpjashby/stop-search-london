@@ -1,0 +1,47 @@
+% change line spacing
+\usepackage[onehalfspacing]{setspace}
+
+% change font to Helvetica for titles and Garamond for body text
+\usepackage[scaled]{helvet}
+\usepackage{garamondx}
+\usepackage[T1]{fontenc}
+% \renewcommand\familydefault{\sfdefault}
+
+% allow coloured text and boxes
+\usepackage{xcolor}
+\definecolor{uclyellow}{HTML}{F6BE00}
+
+% change section titles
+\usepackage{titlesec}
+\titleformat{\section}{\bigskip\raggedright\LARGE\sffamily}{\thesection}{0.5em}{}[\titlerule]
+
+% allow absolute positioning of blocks on title page
+\usepackage[absolute]{textpos}
+\setlength{\TPHorizModule}{1cm}
+\setlength{\TPVertModule}{\TPHorizModule}
+\textblockorigin{0cm}{0cm}
+
+% override default placement of figures by pandoc, which is different from the latex default
+% this code works in conjunction wit the knitr option `fig.pos = 'tbp'`
+\usepackage{float}
+
+% move captions above figures
+% \usepackage{floatrow}
+% \floatsetup[figure]{capposition=top}
+
+% make tables prettier
+\usepackage{booktabs}
+
+% prevent widows and orphans
+% \widowpenalty 10000
+% \clubpenalty 10000
+
+% setup PDF options
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=blue,      
+    urlcolor=blue,
+    pdftitle={Stop and search in London},
+    bookmarks=true
+}
