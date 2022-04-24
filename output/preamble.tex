@@ -3,7 +3,7 @@
 
 % change font to Helvetica for titles and Garamond for body text
 \usepackage[scaled]{helvet}
-\usepackage{garamondx}
+% \usepackage{garamondx}
 \usepackage[T1]{fontenc}
 % \renewcommand\familydefault{\sfdefault}
 
@@ -21,8 +21,9 @@
 \setlength{\TPVertModule}{\TPHorizModule}
 \textblockorigin{0cm}{0cm}
 
-% override default placement of figures by pandoc, which is different from the latex default
-% this code works in conjunction wit the knitr option `fig.pos = 'tbp'`
+% override default placement of figures by pandoc, which is different from the 
+% latex default -- this code works in conjunction with the knitr option 
+% `fig.pos = 'tbp'`
 \usepackage{float}
 
 % move captions above figures
