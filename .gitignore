@@ -37,6 +37,10 @@ vignettes/*.pdf
 *_files/
 *.log
 
+# Data directories
+analysis-data/
+original-data/
+
 # Temporary copies of data
 *.geojson
 *.csv

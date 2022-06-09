@@ -15,7 +15,7 @@ library(tidyverse)
 data_dir <- tempdir()
 data_file <- str_glue("{data_dir}/stop_data.zip")
 GET(
-  "https://data.police.uk/data/archive/2021-12.zip", 
+  "https://data.police.uk/data/archive/2022-03.zip", 
   write_disk(data_file), 
   progress()
 )
@@ -109,7 +109,7 @@ map_dfr(
     ),
     sex = str_to_lower(sex)
   ) %>% 
-  rename(people = `2020`) %>% 
+  rename(people = `2022`) %>% 
   count(sex, age_range, self_defined_ethnicity, wt = people, name = "people") %>% 
   write_rds(here::here("analysis-data/people.rds"))
 
@@ -159,7 +159,7 @@ map_dfr(
     ),
     sex = str_to_lower(sex)
   ) %>% 
-  rename(people = `2020`) %>% 
+  rename(people = `2022`) %>% 
   count(borough, sex, age_range, self_defined_ethnicity, wt = people, name = "people") %>% 
   write_rds(here::here("analysis-data/people-by-borough.rds"))
 
